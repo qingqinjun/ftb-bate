@@ -10,11 +10,13 @@ ftb-bate —— FTB Quests 任务书自动生成器
   - 依赖循环检测与修复
   - 章节 icon 字段
   - 日志持久化
-<<<<<<< HEAD
-=======
-  - 数据文件宽松解析：支持纯字符串数组、{id:name} 字典、
-    {id:..., name:...} 对象数组、外层包装（entities/data/list/...）
->>>>>>> master
+  - 数据文件递归解包：支持任意嵌套，包括
+      {"total_entities": N, "entities": [...]}
+      {"data": {"entities": [...]}}
+      ["modid:id", ...]
+      {"modid:id": "中文名"}
+      [{"id": "...", "name": "..."}]
+  - 任务语言切换（中文 / 英文），由 config.QUEST_LANGUAGE 控制
 ========================================================
 """
 import json
@@ -32,6 +34,11 @@ try:
 except ImportError:
     print("[错误] 未找到 config.py，请先按模板创建")
     sys.exit(1)
+
+
+# ==================== 语言 ====================
+def is_en():
+    return str(getattr(cfg, "QUEST_LANGUAGE", "zh")).lower() == "en"
 
 
 # ==================== 日志 ====================
@@ -96,44 +103,51 @@ def load_file_with_retry(filepath, loader, desc, retries=None):
     return None
 
 
-<<<<<<< HEAD
-# ==================== 数据解析 ====================
-def _parse_items(filepath):
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    result = {}
-    for entry in data:
-        if isinstance(entry, dict) and "id" in entry:
-            result[entry["id"]] = entry.get("name", entry["id"])
-    return result
-=======
-def _unwrap(data, keys):
-    """若 data 是 dict 且含有 keys 中某个键对应的 list/dict，则解包一层。"""
-    if isinstance(data, dict):
-        for wk in keys:
-            if wk in data and isinstance(data[wk], (list, dict)):
-                return data[wk]
-    return data
-
-
 def _clean_str(s):
     return str(s).strip() if s is not None else ""
 
 
+def _find_data_array(data, known_keys, depth=0):
+    """
+    递归从任意嵌套结构中找出目标数组（实体/物品等）。
+    返回 (list_or_dict, 来源路径描述)。
+    """
+    if depth > 6:
+        return None, ""
+    if isinstance(data, list):
+        return data, f"list@{depth}"
+    if isinstance(data, dict):
+        for key in known_keys:
+            if key in data:
+                inner, path = _find_data_array(data[key], known_keys, depth + 1)
+                if inner is not None:
+                    return inner, f"{key}.{path}" if path else key
+        # 未知键名，找第一个 list 或 {id:name} 字典
+        for k, v in data.items():
+            if isinstance(v, list):
+                return v, f"{k}@{depth}"
+            if isinstance(v, dict) and any(
+                isinstance(x, str) and ":" in x for x in v.keys()
+            ):
+                return v, f"{k}@dict"
+    return None, ""
+
+
 # ==================== 数据解析 ====================
 def _parse_items(filepath):
-    """宽松解析 items.json：支持外层包装、字符串数组、{id:name} 字典、{id,name} 对象数组。"""
+    """递归解包 items.json，支持字符串数组 / {id:name} 字典 / 对象数组。"""
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    data = _unwrap(data, ("items", "data", "list", "result", "values"))
-
+    arr, _ = _find_data_array(
+        data, ("items", "item", "data", "list", "result", "values")
+    )
     result = {}
-    if isinstance(data, list):
-        for entry in data:
+    if isinstance(arr, list):
+        for entry in arr:
             if isinstance(entry, str):
                 iid = _clean_str(entry)
-                if iid:
+                if iid and ":" in iid:
                     result[iid] = iid
             elif isinstance(entry, dict):
                 iid = ""
@@ -141,7 +155,7 @@ def _parse_items(filepath):
                     if k in entry and isinstance(entry[k], str):
                         iid = _clean_str(entry[k])
                         break
-                if not iid:
+                if not iid or ":" not in iid:
                     continue
                 iname = ""
                 for k in ("name", "display_name", "translation_key", "zh_name"):
@@ -149,30 +163,13 @@ def _parse_items(filepath):
                         iname = _clean_str(entry[k])
                         break
                 result[iid] = iname or iid
-    elif isinstance(data, dict):
-        for k, v in data.items():
+    elif isinstance(arr, dict):
+        for k, v in arr.items():
             kid = _clean_str(k)
-            if not kid:
+            if not kid or ":" not in kid:
                 continue
-            if isinstance(v, str):
-                result[kid] = _clean_str(v) or kid
-            elif isinstance(v, dict):
-                for k2 in ("id", "item", "registry_name", "name"):
-                    if k2 in v and isinstance(v[k2], str):
-                        kid = _clean_str(v[k2])
-                        break
-                iname = ""
-                for k2 in ("name", "display_name", "translation_key"):
-                    if k2 in v and isinstance(v[k2], str):
-                        iname = _clean_str(v[k2])
-                        break
-                result[kid] = iname or kid
-            else:
-                result[kid] = kid
-
-    cleaned = {k: v for k, v in result.items() if ":" in k}
-    return cleaned
->>>>>>> master
+            result[kid] = _clean_str(v) if isinstance(v, str) and v else kid
+    return result
 
 
 def _parse_structures(filepath):
@@ -188,44 +185,41 @@ def _parse_modlist(filepath):
 
 
 def _parse_entities(filepath):
-<<<<<<< HEAD
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    result = {}
-    if isinstance(data, list):
-        for entry in data:
-            if isinstance(entry, dict) and "id" in entry:
-                result[entry["id"]] = entry.get("name", entry["id"])
-            elif isinstance(entry, str):
-                result[entry] = entry
-    elif isinstance(data, dict):
-        for k, v in data.items():
-            if isinstance(v, str):
-                result[k] = v
-            elif isinstance(v, dict) and "id" in v:
-                result[v["id"]] = v.get("name", v["id"])
-    return result
-=======
-    """宽松解析 entities_list.json：支持所有常见格式，并对无效条目做容错。"""
+    """
+    递归解析 entities_list.json：支持
+      {"total_entities": N, "entities": [...]}
+      {"data": {"entities": [...]}}
+      ["modid:entity", ...]
+      {"modid:entity": "中文名"}
+      [{"id": "...", "name": "..."}]
+    每条 strip()，只保留含 ":" 的合法 ID。
+    """
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    data = _unwrap(data, ("entities", "data", "list", "items", "result", "values"))
+    arr, source = _find_data_array(
+        data, ("entities", "entity", "data", "list", "items", "result", "values")
+    )
+    if arr is None:
+        log(f"  [警告] 无法从 entities_list.json 中找到实体数组"
+            f"（顶层类型: {type(data).__name__}）")
+        return {}
 
     result = {}
-    if isinstance(data, list):
-        for entry in data:
+    if isinstance(arr, list):
+        for entry in arr:
             if isinstance(entry, str):
                 eid = _clean_str(entry)
-                if eid:
+                if eid and ":" in eid:
                     result[eid] = eid
             elif isinstance(entry, dict):
                 eid = ""
-                for k in ("id", "entity", "registry_name", "type", "key", "name", "resource_location"):
+                for k in ("id", "entity", "registry_name", "type", "key",
+                          "name", "resource_location"):
                     if k in entry and isinstance(entry[k], str):
                         eid = _clean_str(entry[k])
                         break
-                if not eid:
+                if not eid or ":" not in eid:
                     continue
                 ename = ""
                 for k in ("name", "display_name", "translation_key", "zh_name"):
@@ -233,30 +227,15 @@ def _parse_entities(filepath):
                         ename = _clean_str(entry[k])
                         break
                 result[eid] = ename or eid
-    elif isinstance(data, dict):
-        for k, v in data.items():
+    elif isinstance(arr, dict):
+        for k, v in arr.items():
             kid = _clean_str(k)
-            if not kid:
+            if not kid or ":" not in kid:
                 continue
-            if isinstance(v, str):
-                result[kid] = _clean_str(v) or kid
-            elif isinstance(v, dict):
-                for k2 in ("id", "entity", "registry_name", "type", "key"):
-                    if k2 in v and isinstance(v[k2], str):
-                        kid = _clean_str(v[k2])
-                        break
-                ename = ""
-                for k2 in ("name", "display_name", "translation_key"):
-                    if k2 in v and isinstance(v[k2], str):
-                        ename = _clean_str(v[k2])
-                        break
-                result[kid] = ename or kid
-            else:
-                result[kid] = kid
+            result[kid] = _clean_str(v) if isinstance(v, str) and v else kid
 
-    cleaned = {k: v for k, v in result.items() if ":" in k}
-    return cleaned
->>>>>>> master
+    log(f"  [解析] 实体数组来源: {source}，解析出 {len(result)} 条")
+    return result
 
 
 def load_items(filepath):
@@ -288,6 +267,11 @@ def load_entities(filepath):
     if data is None:
         return {}
     log(f"[加载] entities_list.json: {len(data)} 个实体")
+    if data:
+        log(f"[诊断] 实体样本: {list(data.keys())[:5]}")
+        for prefix in ("twilightforest", "legendary_monsters"):
+            hit = sum(1 for k in data if k.startswith(prefix + ":"))
+            log(f"[诊断] {prefix}: {hit} 条")
     return data
 
 
@@ -315,17 +299,7 @@ def chapter_context(chapter_index):
 
 
 # ==================== 提示词 ====================
-def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, already):
-    ctx = chapter_context(chapter_index)
-
-    item_pool = filter_by_prefix(item_ids, ctx["item_prefixes"]) if ctx["item_prefixes"] else []
-    if not item_pool:
-        item_pool = item_ids[:60]
-    struct_pool = structures[:20] if ctx["use_structures"] else []
-    entity_pool = filter_by_prefix(entity_ids, ctx["entity_prefixes"]) if ctx["entity_prefixes"] else []
-    if not entity_pool and ctx["entity_prefixes"]:
-        entity_pool = entity_ids[:30]
-
+def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -354,7 +328,7 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
     else:
         type_hint = 'type 只能是 "item" 或 "checkmark"。item 类型必须有真实存在的 "id"。'
 
-    prompt = f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
+    return f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
 
 为第 {chapter_index + 1} 章「{ctx["title"]}」生成第 {batch_index + 1} 批任务，共 {cfg.BATCH_SIZE} 个。
 
@@ -374,13 +348,8 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
 【可用结构 ID】（structure 类型必须使用真实 ID，禁止编造）：
 {json.dumps(struct_pool, ensure_ascii=False)}
 
-<<<<<<< HEAD
-【可用实体 ID】（kill 类型必须使用真实 ID，禁止编造）：
-{json.dumps(entity_pool[:40], ensure_ascii=False)}
-=======
 【可用实体 ID】（kill 类型必须从以下列表**逐字复制**，禁止修改、禁止编造）：
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
->>>>>>> master
 
 【输出格式】严格输出 JSON 数组，不要 Markdown 代码块，不要解释文字：
 [
@@ -398,7 +367,93 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
 - title ≤ 12 字，desc ≤ 30 字
 - 绝对不要编造物品、结构或实体 ID
 """
-    return prompt
+
+
+def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool):
+    prev_keys = [q["key"] for q in already]
+    prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
+
+    if not already:
+        chain_hint = (
+            "This is the first batch of this chapter. The first quest's dependencies MUST be an empty array []; "
+            "it acts as the chapter root. Later quests may branch freely or be isolated. Full chaining is not required."
+        )
+    else:
+        chain_hint = (
+            "This is a follow-up batch. New quests may reference existing keys as dependencies, but chaining is not mandatory. "
+            "Independent or branching quests are allowed. dependencies may be an empty array [] (no prerequisite)."
+        )
+
+    if ctx["use_structures"]:
+        type_hint = (
+            'This chapter focuses on type="structure" quests: completed automatically when the player finds the structure. '
+            'The "id" MUST be a real structure ID from the provided list.'
+        )
+    elif ctx["entity_prefixes"]:
+        type_hint = (
+            'Allowed types: "item" / "checkmark" / "kill". '
+            'kill quests MUST have a real "id" (entity ID) and an integer "count". '
+            'item quests MUST have a real item "id".'
+        )
+    else:
+        type_hint = 'type must be "item" or "checkmark". item quests MUST have a real "id".'
+
+    return f"""You are a Minecraft FTB Quests designer. {cfg.PACK_INTRO}
+
+Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}", total {cfg.BATCH_SIZE} quests.
+
+[Chapter focus] {ctx["focus"]}
+[Overall requirements] {ctx["extra"]}
+[Chaining rule] {chain_hint}
+
+[Existing quest keys] (dependencies may only reference these or earlier quests in this batch; empty array allowed):
+{json.dumps(prev_keys, ensure_ascii=False)}
+
+[Recent quest examples] (last 8):
+{json.dumps(prev_desc, ensure_ascii=False)}
+
+[Available item IDs] (must be real, do NOT invent):
+{json.dumps(item_pool[:40], ensure_ascii=False)}
+
+[Available structure IDs] (structure quests must use real IDs, do NOT invent):
+{json.dumps(struct_pool, ensure_ascii=False)}
+
+[Available entity IDs] (kill quests MUST copy these verbatim, do NOT modify or invent):
+{json.dumps(entity_pool[:80], ensure_ascii=False)}
+
+[Output format] Output ONLY a JSON array, no Markdown code block, no explanation:
+[
+  {{"key": "t1", "type": "item", "id": "modid:item_name", "title": "English title", "desc": "English description", "dependencies": []}},
+  {{"key": "t2", "type": "checkmark", "title": "English title", "desc": "English description", "dependencies": ["t1"]}},
+  {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "English title", "desc": "English description", "dependencies": ["t2"]}},
+  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "English title", "desc": "English description", "dependencies": []}}
+]
+
+Rules:
+- Exactly {cfg.BATCH_SIZE} quests per batch
+- key unique within this chapter, short names like t1/t2/...
+- {type_hint}
+- dependencies is an array of keys; empty array means no prerequisite
+- title ≤ 5 words, desc ≤ 15 words
+- All title/desc MUST be in English
+- NEVER invent item, structure or entity IDs
+"""
+
+
+def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, already):
+    ctx = chapter_context(chapter_index)
+
+    item_pool = filter_by_prefix(item_ids, ctx["item_prefixes"]) if ctx["item_prefixes"] else []
+    if not item_pool:
+        item_pool = item_ids[:60]
+    struct_pool = structures[:20] if ctx["use_structures"] else []
+    entity_pool = filter_by_prefix(entity_ids, ctx["entity_prefixes"]) if ctx["entity_prefixes"] else []
+    if not entity_pool and ctx["entity_prefixes"]:
+        entity_pool = entity_ids[:30]
+
+    if is_en():
+        return _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool)
+    return _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool)
 
 
 # ==================== API 调用 ====================
@@ -411,7 +466,9 @@ def call_deepseek(prompt, max_retries=3):
     payload = {
         "model": cfg.MODEL,
         "messages": [
-            {"role": "system", "content": "你只输出 JSON 数组，不输出任何解释，不使用 Markdown 代码块。"},
+            {"role": "system", "content": "You output only a JSON array, no explanation, no Markdown code block."
+                                          if is_en() else
+                                          "你只输出 JSON 数组，不输出任何解释，不使用 Markdown 代码块。"},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.7,
@@ -462,7 +519,7 @@ def normalize_batch(batch, already, batch_index, valid_structures=None, valid_en
         deps = [str(d) for d in deps if isinstance(d, (str, int))]
 
         raw_type = q.get("type")
-        raw_id = q.get("id", "")
+        raw_id = _clean_str(q.get("id", ""))
 
         if raw_type == "item" and raw_id:
             qtype, qid = "item", raw_id
@@ -520,17 +577,6 @@ def break_cycles(quests):
     color = {k: 0 for k in graph}  # 0=白 1=灰 2=黑
     removed = [0]
 
-<<<<<<< HEAD
-    def dfs(node, path):
-        color[node] = 1
-        for dep in list(graph[node]):
-            if color.get(dep, 0) == 1:  # 回边
-                graph[node].remove(dep)
-                removed[0] += 1
-                log(f"    [循环] 断开依赖: {node} -> {dep}")
-            elif color.get(dep, 0) == 0:
-                dfs(dep, path)
-=======
     def dfs(node):
         color[node] = 1
         for dep in list(graph[node]):
@@ -541,16 +587,11 @@ def break_cycles(quests):
                 log(f"    [循环] 断开依赖: {node} -> {dep}")
             elif c == 0:
                 dfs(dep)
->>>>>>> master
         color[node] = 2
 
     for k in list(graph):
         if color[k] == 0:
-<<<<<<< HEAD
-            dfs(k, [])
-=======
             dfs(k)
->>>>>>> master
 
     if removed[0]:
         for q in quests:
@@ -559,13 +600,6 @@ def break_cycles(quests):
 
 
 # ==================== 奖励 ====================
-<<<<<<< HEAD
-def build_reward_snbt(quest_type, table_id):
-    """
-    返回 (snbt, 是否需要引用 reward table)。
-    table_id 是 cfg.REWARD_TABLES 的 key，会映射成真实表 ID。
-    """
-=======
 _REWARD_TABLE_ID_CACHE = {}
 
 
@@ -596,7 +630,6 @@ def build_reward_table_snbt(key):
 
 def build_reward_snbt(quest_type, table_id):
     """为任务生成奖励 SNBT 片段。"""
->>>>>>> master
     rewards = []
     if quest_type == "structure":
         xp = random.choice([30, 40, 50, 60])
@@ -628,37 +661,6 @@ def build_reward_snbt(quest_type, table_id):
     return "[" + ",".join(rewards) + "]"
 
 
-<<<<<<< HEAD
-def build_reward_table_snbt(key):
-    """根据 cfg.REWARD_TABLES[key] 生成 reward_tables/<key>.snbt 内容。"""
-    spec = cfg.REWARD_TABLES[key]
-    entries = []
-    for e in spec["entries"]:
-        entries.append(
-            f'{{type:"item",item:"{e["item"]}",count:{e["count"]},weight:{e.get("weight",1)}}}'
-        )
-    table_id = _reward_table_id(key)
-    return table_id, f'''{{
-    id: "{table_id}"
-    title: "{spec["title"]}"
-    loot_size: 1
-    entries: [
-        {",".join(entries)}
-    ]
-}}'''
-
-
-_REWARD_TABLE_ID_CACHE = {}
-
-
-def _reward_table_id(key):
-    if key not in _REWARD_TABLE_ID_CACHE:
-        _REWARD_TABLE_ID_CACHE[key] = gen_hex_id()
-    return _REWARD_TABLE_ID_CACHE[key]
-
-
-=======
->>>>>>> master
 # ==================== SNBT 生成 ====================
 def build_snbt_quest(quest, key_to_id, x, y, reward_table_id):
     qid = key_to_id[quest["key"]]
@@ -699,10 +701,7 @@ def generate_chapter_snbt(chapter_index, quests, group_id):
 
     key_to_id = {q["key"]: ID_POOL.new() for q in quests}
 
-<<<<<<< HEAD
     # 选择奖励表
-=======
->>>>>>> master
     if ctx["use_structures"]:
         rtable_key = "structure"
     elif chapter_index >= cfg.TOTAL_CHAPTERS - 1:
@@ -793,10 +792,7 @@ def generate_chapter(item_ids, structures, entity_ids, chapter_index):
         all_quests.extend(cleaned)
         log(f"    本批 {len(cleaned)} 个，累计 {len(all_quests)} 个")
 
-<<<<<<< HEAD
     # 循环检测
-=======
->>>>>>> master
     n_cycles = break_cycles(all_quests)
     if n_cycles:
         log(f"    [修复] 断开 {n_cycles} 条循环依赖")
@@ -810,6 +806,7 @@ def main():
     try:
         log("=" * 60)
         log(" ftb-bate · FTB Quests 任务书自动生成器")
+        log(f" 语言: {'English' if is_en() else '中文'}")
         log("=" * 60)
 
         if not cfg.API_KEY:
