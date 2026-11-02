@@ -1,0 +1,27 @@
+# 数据文件（整合包专属，体积大，不进仓库）
+*.json
+*.txt
+!requirements.txt
+data/
+output/
+chapter_*.snbt
+data.snbt
+
+# 用户配置（从 config.example.py 复制而来）
+config.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
