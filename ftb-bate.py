@@ -10,6 +10,11 @@ ftb-bate —— FTB Quests 任务书自动生成器
   - 依赖循环检测与修复
   - 章节 icon 字段
   - 日志持久化
+<<<<<<< HEAD
+=======
+  - 数据文件宽松解析：支持纯字符串数组、{id:name} 字典、
+    {id:..., name:...} 对象数组、外层包装（entities/data/list/...）
+>>>>>>> master
 ========================================================
 """
 import json
@@ -91,6 +96,7 @@ def load_file_with_retry(filepath, loader, desc, retries=None):
     return None
 
 
+<<<<<<< HEAD
 # ==================== 数据解析 ====================
 def _parse_items(filepath):
     with open(filepath, "r", encoding="utf-8") as f:
@@ -100,6 +106,73 @@ def _parse_items(filepath):
         if isinstance(entry, dict) and "id" in entry:
             result[entry["id"]] = entry.get("name", entry["id"])
     return result
+=======
+def _unwrap(data, keys):
+    """若 data 是 dict 且含有 keys 中某个键对应的 list/dict，则解包一层。"""
+    if isinstance(data, dict):
+        for wk in keys:
+            if wk in data and isinstance(data[wk], (list, dict)):
+                return data[wk]
+    return data
+
+
+def _clean_str(s):
+    return str(s).strip() if s is not None else ""
+
+
+# ==================== 数据解析 ====================
+def _parse_items(filepath):
+    """宽松解析 items.json：支持外层包装、字符串数组、{id:name} 字典、{id,name} 对象数组。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    data = _unwrap(data, ("items", "data", "list", "result", "values"))
+
+    result = {}
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, str):
+                iid = _clean_str(entry)
+                if iid:
+                    result[iid] = iid
+            elif isinstance(entry, dict):
+                iid = ""
+                for k in ("id", "item", "registry_name", "name", "key", "resource_location"):
+                    if k in entry and isinstance(entry[k], str):
+                        iid = _clean_str(entry[k])
+                        break
+                if not iid:
+                    continue
+                iname = ""
+                for k in ("name", "display_name", "translation_key", "zh_name"):
+                    if k in entry and isinstance(entry[k], str) and entry[k] != iid:
+                        iname = _clean_str(entry[k])
+                        break
+                result[iid] = iname or iid
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            kid = _clean_str(k)
+            if not kid:
+                continue
+            if isinstance(v, str):
+                result[kid] = _clean_str(v) or kid
+            elif isinstance(v, dict):
+                for k2 in ("id", "item", "registry_name", "name"):
+                    if k2 in v and isinstance(v[k2], str):
+                        kid = _clean_str(v[k2])
+                        break
+                iname = ""
+                for k2 in ("name", "display_name", "translation_key"):
+                    if k2 in v and isinstance(v[k2], str):
+                        iname = _clean_str(v[k2])
+                        break
+                result[kid] = iname or kid
+            else:
+                result[kid] = kid
+
+    cleaned = {k: v for k, v in result.items() if ":" in k}
+    return cleaned
+>>>>>>> master
 
 
 def _parse_structures(filepath):
@@ -115,6 +188,7 @@ def _parse_modlist(filepath):
 
 
 def _parse_entities(filepath):
+<<<<<<< HEAD
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
     result = {}
@@ -131,6 +205,58 @@ def _parse_entities(filepath):
             elif isinstance(v, dict) and "id" in v:
                 result[v["id"]] = v.get("name", v["id"])
     return result
+=======
+    """宽松解析 entities_list.json：支持所有常见格式，并对无效条目做容错。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    data = _unwrap(data, ("entities", "data", "list", "items", "result", "values"))
+
+    result = {}
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, str):
+                eid = _clean_str(entry)
+                if eid:
+                    result[eid] = eid
+            elif isinstance(entry, dict):
+                eid = ""
+                for k in ("id", "entity", "registry_name", "type", "key", "name", "resource_location"):
+                    if k in entry and isinstance(entry[k], str):
+                        eid = _clean_str(entry[k])
+                        break
+                if not eid:
+                    continue
+                ename = ""
+                for k in ("name", "display_name", "translation_key", "zh_name"):
+                    if k in entry and isinstance(entry[k], str) and entry[k] != eid:
+                        ename = _clean_str(entry[k])
+                        break
+                result[eid] = ename or eid
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            kid = _clean_str(k)
+            if not kid:
+                continue
+            if isinstance(v, str):
+                result[kid] = _clean_str(v) or kid
+            elif isinstance(v, dict):
+                for k2 in ("id", "entity", "registry_name", "type", "key"):
+                    if k2 in v and isinstance(v[k2], str):
+                        kid = _clean_str(v[k2])
+                        break
+                ename = ""
+                for k2 in ("name", "display_name", "translation_key"):
+                    if k2 in v and isinstance(v[k2], str):
+                        ename = _clean_str(v[k2])
+                        break
+                result[kid] = ename or kid
+            else:
+                result[kid] = kid
+
+    cleaned = {k: v for k, v in result.items() if ":" in k}
+    return cleaned
+>>>>>>> master
 
 
 def load_items(filepath):
@@ -248,8 +374,13 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
 【可用结构 ID】（structure 类型必须使用真实 ID，禁止编造）：
 {json.dumps(struct_pool, ensure_ascii=False)}
 
+<<<<<<< HEAD
 【可用实体 ID】（kill 类型必须使用真实 ID，禁止编造）：
 {json.dumps(entity_pool[:40], ensure_ascii=False)}
+=======
+【可用实体 ID】（kill 类型必须从以下列表**逐字复制**，禁止修改、禁止编造）：
+{json.dumps(entity_pool[:80], ensure_ascii=False)}
+>>>>>>> master
 
 【输出格式】严格输出 JSON 数组，不要 Markdown 代码块，不要解释文字：
 [
@@ -389,6 +520,7 @@ def break_cycles(quests):
     color = {k: 0 for k in graph}  # 0=白 1=灰 2=黑
     removed = [0]
 
+<<<<<<< HEAD
     def dfs(node, path):
         color[node] = 1
         for dep in list(graph[node]):
@@ -398,11 +530,27 @@ def break_cycles(quests):
                 log(f"    [循环] 断开依赖: {node} -> {dep}")
             elif color.get(dep, 0) == 0:
                 dfs(dep, path)
+=======
+    def dfs(node):
+        color[node] = 1
+        for dep in list(graph[node]):
+            c = color.get(dep, 0)
+            if c == 1:  # 回边
+                graph[node].remove(dep)
+                removed[0] += 1
+                log(f"    [循环] 断开依赖: {node} -> {dep}")
+            elif c == 0:
+                dfs(dep)
+>>>>>>> master
         color[node] = 2
 
     for k in list(graph):
         if color[k] == 0:
+<<<<<<< HEAD
             dfs(k, [])
+=======
+            dfs(k)
+>>>>>>> master
 
     if removed[0]:
         for q in quests:
@@ -411,11 +559,44 @@ def break_cycles(quests):
 
 
 # ==================== 奖励 ====================
+<<<<<<< HEAD
 def build_reward_snbt(quest_type, table_id):
     """
     返回 (snbt, 是否需要引用 reward table)。
     table_id 是 cfg.REWARD_TABLES 的 key，会映射成真实表 ID。
     """
+=======
+_REWARD_TABLE_ID_CACHE = {}
+
+
+def _reward_table_id(key):
+    if key not in _REWARD_TABLE_ID_CACHE:
+        _REWARD_TABLE_ID_CACHE[key] = gen_hex_id()
+    return _REWARD_TABLE_ID_CACHE[key]
+
+
+def build_reward_table_snbt(key):
+    """根据 cfg.REWARD_TABLES[key] 生成 reward_tables/<key>.snbt 内容。"""
+    spec = cfg.REWARD_TABLES[key]
+    entries = []
+    for e in spec["entries"]:
+        entries.append(
+            f'{{type:"item",item:"{e["item"]}",count:{e["count"]},weight:{e.get("weight",1)}}}'
+        )
+    table_id = _reward_table_id(key)
+    return table_id, f'''{{
+    id: "{table_id}"
+    title: "{spec["title"]}"
+    loot_size: 1
+    entries: [
+        {",".join(entries)}
+    ]
+}}'''
+
+
+def build_reward_snbt(quest_type, table_id):
+    """为任务生成奖励 SNBT 片段。"""
+>>>>>>> master
     rewards = []
     if quest_type == "structure":
         xp = random.choice([30, 40, 50, 60])
@@ -447,6 +628,7 @@ def build_reward_snbt(quest_type, table_id):
     return "[" + ",".join(rewards) + "]"
 
 
+<<<<<<< HEAD
 def build_reward_table_snbt(key):
     """根据 cfg.REWARD_TABLES[key] 生成 reward_tables/<key>.snbt 内容。"""
     spec = cfg.REWARD_TABLES[key]
@@ -475,6 +657,8 @@ def _reward_table_id(key):
     return _REWARD_TABLE_ID_CACHE[key]
 
 
+=======
+>>>>>>> master
 # ==================== SNBT 生成 ====================
 def build_snbt_quest(quest, key_to_id, x, y, reward_table_id):
     qid = key_to_id[quest["key"]]
@@ -515,7 +699,10 @@ def generate_chapter_snbt(chapter_index, quests, group_id):
 
     key_to_id = {q["key"]: ID_POOL.new() for q in quests}
 
+<<<<<<< HEAD
     # 选择奖励表
+=======
+>>>>>>> master
     if ctx["use_structures"]:
         rtable_key = "structure"
     elif chapter_index >= cfg.TOTAL_CHAPTERS - 1:
@@ -606,7 +793,10 @@ def generate_chapter(item_ids, structures, entity_ids, chapter_index):
         all_quests.extend(cleaned)
         log(f"    本批 {len(cleaned)} 个，累计 {len(all_quests)} 个")
 
+<<<<<<< HEAD
     # 循环检测
+=======
+>>>>>>> master
     n_cycles = break_cycles(all_quests)
     if n_cycles:
         log(f"    [修复] 断开 {n_cycles} 条循环依赖")
