@@ -5,7 +5,7 @@ ftb-bate —— FTB Quests 任务书自动生成器--本程序完全免费
 ========================================================
 支持：
   - 章节组 / 章节 / 任务三层结构
-  - item / checkmark / structure / kill 四种原生任务类型
+  - item / checkmark / structure / kill / advancement / fluid 六种任务类型
   - 真实 reward_tables 生成，random 奖励引用真实表
   - 奖励物品优先从 items.json 动态构建
   - 依赖循环检测与修复
@@ -16,6 +16,7 @@ ftb-bate —— FTB Quests 任务书自动生成器--本程序完全免费
   - 任务语言切换（zh / en）
   - MC 百科：模组级攻略补充，优先读 modlist 的模组中文名
   - 奖励跟随任务难度动态变化
+  - 【新增】成就任务、流体任务可在运行时选择是否启用
 ========================================================
 """
 import json
@@ -393,7 +394,7 @@ def _parse_entities(filepath):
         data, ("entities", "entity", "data", "list", "items", "result", "values")
     )
     if arr is None:
-        log(f"  [警告] 无法从 entities.json 中找到实体数组")
+        log(f"  [警告] 无法从 entities_list.json 中找到实体数组")
         return {}
     result = {}
     if isinstance(arr, list):
@@ -427,6 +428,32 @@ def _parse_entities(filepath):
     return result
 
 
+def _parse_advancements(filepath):
+    """读 advancements.json（字符串数组），返回进度 ID 列表。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    arr = data if isinstance(data, list) else []
+    out = []
+    for e in arr:
+        s = _clean_str(e)
+        if s and ":" in s:
+            out.append(s)
+    return out
+
+
+def _parse_fluids(filepath):
+    """读 fluids.json（字符串数组），返回流体 ID 列表。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    arr = data if isinstance(data, list) else []
+    out = []
+    for e in arr:
+        s = _clean_str(e)
+        if s and ":" in s:
+            out.append(s)
+    return out
+
+
 def load_items(filepath):
     data = load_file_with_retry(filepath, _parse_items, "items.json")
     if data is None:
@@ -456,6 +483,22 @@ def load_entities(filepath):
     if data is None:
         return {}
     log(f"[加载] entities.json: {len(data)} 个实体")
+    return data
+
+
+def load_advancements(filepath):
+    data = load_file_with_retry(filepath, _parse_advancements, "advancements.json")
+    if data is None:
+        return []
+    log(f"[加载] advancements.json: {len(data)} 个进度")
+    return data
+
+
+def load_fluids(filepath):
+    data = load_file_with_retry(filepath, _parse_fluids, "fluids.json")
+    if data is None:
+        return []
+    log(f"[加载] fluids.json: {len(data)} 个流体")
     return data
 
 
@@ -497,7 +540,8 @@ def chapter_context(chapter_index):
 
 # ==================== 提示词 ====================
 def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
-               entity_pool, allowed, mcmod_section=""):
+               entity_pool, allowed, advancement_pool=None, fluid_pool=None,
+               mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -521,6 +565,10 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         type_lines.append('structure 类型：必须从【可用结构 ID】中选择真实 "id"')
     if "kill" in allowed:
         type_lines.append('kill 类型：必须从【可用实体 ID】逐字复制 "id"，并给 "count"')
+    if "advancement" in allowed:
+        type_lines.append('advancement 类型：必须从【可用进度 ID】中逐字复制 "id"')
+    if "fluid" in allowed:
+        type_lines.append('fluid 类型：必须从【可用流体 ID】中逐字复制 "id"')
     type_hint = "本章允许的任务类型：\n- " + "\n- ".join(type_lines)
 
     difficulty_hint = (
@@ -528,6 +576,19 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         f"批次越靠后任务应越难（count 更大、依赖更深、优先用高难度任务类型）。"
         f"奖励会根据难度自动调整。"
     )
+
+    adv_block = ""
+    if advancement_pool and "advancement" in allowed:
+        adv_block = (
+            "\n【可用进度 ID】（advancement 类型必须逐字复制）：\n"
+            + json.dumps(advancement_pool[:80], ensure_ascii=False)
+        )
+    fluid_block = ""
+    if fluid_pool and "fluid" in allowed:
+        fluid_block = (
+            "\n【可用流体 ID】（fluid 类型必须逐字复制）：\n"
+            + json.dumps(fluid_pool[:60], ensure_ascii=False)
+        )
 
     return f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
 
@@ -552,13 +613,17 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 
 【可用实体 ID】（kill 类型必须逐字复制）：
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
+{adv_block}
+{fluid_block}
 {mcmod_section}
 【输出格式】严格输出 JSON 数组，不要 Markdown 代码块：
 [
   {{"key": "t1", "type": "item", "id": "modid:item_name", "count": 5, "title": "中文标题", "desc": "中文描述", "dependencies": []}},
   {{"key": "t2", "type": "checkmark", "title": "中文标题", "desc": "中文描述", "dependencies": ["t1"]}},
   {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "中文标题", "desc": "中文描述", "dependencies": ["t2"]}},
-  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "中文标题", "desc": "中文描述", "dependencies": []}}
+  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "中文标题", "desc": "中文描述", "dependencies": []}},
+  {{"key": "t5", "type": "advancement", "id": "minecraft:story/mine_stone", "title": "中文标题", "desc": "中文描述", "dependencies": []}},
+  {{"key": "t6", "type": "fluid", "id": "minecraft:water", "title": "中文标题", "desc": "中文描述", "dependencies": []}}
 ]
 
 规则：
@@ -567,12 +632,13 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 - {type_hint}
 - dependencies 是 key 数组，可为空
 - title ≤ 12 字，desc ≤ 30 字
-- 绝对不要编造物品、结构或实体 ID
+- 绝对不要编造物品、结构、实体、进度或流体 ID
 """
 
 
 def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
-               entity_pool, allowed, mcmod_section=""):
+               entity_pool, allowed, advancement_pool=None, fluid_pool=None,
+               mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -595,6 +661,10 @@ def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         type_lines.append('structure quest: "id" MUST be a real structure ID')
     if "kill" in allowed:
         type_lines.append('kill quest: "id" MUST be copied verbatim; add integer "count"')
+    if "advancement" in allowed:
+        type_lines.append('advancement quest: "id" MUST be copied verbatim from advancement IDs')
+    if "fluid" in allowed:
+        type_lines.append('fluid quest: "id" MUST be copied verbatim from fluid IDs')
     type_hint = "Allowed quest types:\n- " + "\n- ".join(type_lines)
 
     difficulty_hint = (
@@ -602,6 +672,19 @@ def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         f"(higher count, deeper dependencies, prefer harder task types). "
         f"Rewards scale with difficulty automatically."
     )
+
+    adv_block = ""
+    if advancement_pool and "advancement" in allowed:
+        adv_block = (
+            "\n[Available advancement IDs] (copy verbatim):\n"
+            + json.dumps(advancement_pool[:80], ensure_ascii=False)
+        )
+    fluid_block = ""
+    if fluid_pool and "fluid" in allowed:
+        fluid_block = (
+            "\n[Available fluid IDs] (copy verbatim):\n"
+            + json.dumps(fluid_pool[:60], ensure_ascii=False)
+        )
 
     return f"""You are a Minecraft FTB Quests designer. {cfg.PACK_INTRO}
 
@@ -626,13 +709,17 @@ Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}"
 
 [Available entity IDs]:
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
+{adv_block}
+{fluid_block}
 {mcmod_section}
 [Output format] Output ONLY a JSON array, no Markdown:
 [
   {{"key": "t1", "type": "item", "id": "modid:item_name", "count": 5, "title": "English title", "desc": "English description", "dependencies": []}},
   {{"key": "t2", "type": "checkmark", "title": "English title", "desc": "English description", "dependencies": ["t1"]}},
   {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "English title", "desc": "English description", "dependencies": ["t2"]}},
-  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "English title", "desc": "English description", "dependencies": []}}
+  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "English title", "desc": "English description", "dependencies": []}},
+  {{"key": "t5", "type": "advancement", "id": "minecraft:story/mine_stone", "title": "English title", "desc": "English description", "dependencies": []}},
+  {{"key": "t6", "type": "fluid", "id": "minecraft:water", "title": "English title", "desc": "English description", "dependencies": []}}
 ]
 
 Rules:
@@ -646,7 +733,8 @@ Rules:
 """
 
 
-def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, already):
+def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index,
+                 already, advancement_ids=None, fluid_ids=None):
     ctx = chapter_context(chapter_index)
 
     allowed = list(ctx["task_types"])
@@ -654,6 +742,10 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
         allowed.remove("structure")
     if not entity_ids and "kill" in allowed:
         allowed.remove("kill")
+    if (not advancement_ids) and "advancement" in allowed:
+        allowed.remove("advancement")
+    if (not fluid_ids) and "fluid" in allowed:
+        allowed.remove("fluid")
     if not allowed:
         allowed = ["item", "checkmark"]
 
@@ -669,9 +761,11 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
 
     if is_en():
         return _prompt_en(ctx, chapter_index, batch_index, already,
-                          item_pool, struct_pool, entity_pool, allowed, mcmod_section)
+                          item_pool, struct_pool, entity_pool, allowed,
+                          advancement_ids, fluid_ids, mcmod_section)
     return _prompt_zh(ctx, chapter_index, batch_index, already,
-                      item_pool, struct_pool, entity_pool, allowed, mcmod_section)
+                      item_pool, struct_pool, entity_pool, allowed,
+                      advancement_ids, fluid_ids, mcmod_section)
 
 
 # ==================== 整合包介绍章节提示词 ====================
@@ -770,9 +864,12 @@ def call_deepseek(prompt, max_retries=3):
 # ==================== 结果清洗 ====================
 def normalize_batch(batch, already, batch_index,
                     valid_structures=None, valid_entities=None,
+                    valid_advancements=None, valid_fluids=None,
                     allowed_types=None):
     valid_structures = set(valid_structures or [])
     valid_entities   = set(valid_entities or [])
+    valid_advancements = set(valid_advancements or [])
+    valid_fluids     = set(valid_fluids or [])
     allowed_types    = set(allowed_types or ["item", "checkmark"])
 
     cleaned = []
@@ -807,8 +904,14 @@ def normalize_batch(batch, already, batch_index,
                 count = max(1, int(q.get("count", 1)))
             except (TypeError, ValueError):
                 count = 1
+        elif (raw_type == "advancement" and raw_id
+              and raw_id in valid_advancements and "advancement" in allowed_types):
+            qtype, qid = "advancement", raw_id
+        elif (raw_type == "fluid" and raw_id
+              and raw_id in valid_fluids and "fluid" in allowed_types):
+            qtype, qid = "fluid", raw_id
         else:
-            if raw_type in ("structure", "kill") and raw_id:
+            if raw_type in ("structure", "kill", "advancement", "fluid") and raw_id:
                 log(f"    [警告] {raw_type} ID 无效或未被允许: {raw_id}，降级为 checkmark")
             qtype, qid, count = "checkmark", "", None
 
@@ -980,7 +1083,8 @@ def _default_difficulty_tiers():
 
 
 def _default_task_type_difficulty():
-    return {"checkmark": 1, "item": 2, "kill": 3, "structure": 4}
+    return {"checkmark": 1, "item": 2, "kill": 3, "structure": 4,
+            "advancement": 3, "fluid": 2}
 
 
 def calc_task_difficulty(quest, all_quests):
@@ -1166,6 +1270,23 @@ def attach_rewards_to_quests(quests, item_pool):
     return tables
 
 
+# ==================== 运行时开关询问 ====================
+def ask_yes_no(question, default=False):
+    hint = "[Y/n]" if default else "[y/N]"
+    while True:
+        try:
+            ans = input(f"{question} {hint}: ").strip().lower()
+        except EOFError:
+            return default
+        if not ans:
+            return default
+        if ans in ("y", "yes", "是", "1"):
+            return True
+        if ans in ("n", "no", "否", "0"):
+            return False
+        print("  请输入 y 或 n")
+
+
 # ==================== 主流程 ====================
 def main():
     random.seed(getattr(cfg, "RANDOM_SEED", None))
@@ -1178,11 +1299,24 @@ def main():
     log(f"[语言] {'English' if is_en() else '中文'}")
     log(f"[难度奖励] {'开启' if getattr(cfg, 'ENABLE_DIFFICULTY_REWARDS', True) else '关闭'}")
 
+    # ---- 运行时询问：是否启用成就 / 流体任务 ----
+    log(f"\n===== 任务类型开关 =====")
+    enable_advancement = ask_yes_no(
+        "是否允许生成【成就/进度】类型任务？", default=False
+    )
+    enable_fluid = ask_yes_no(
+        "是否允许生成【流体】类型任务？", default=False
+    )
+    log(f"[开关] 成就任务: {'开启' if enable_advancement else '关闭'}")
+    log(f"[开关] 流体任务: {'开启' if enable_fluid else '关闭'}")
+
     # ---- 加载数据 ----
     items_path = getattr(cfg, "ITEMS_FILE", "dumpids/items.json")
     structs_path = getattr(cfg, "STRUCTURES_FILE", "dumpids/structures.json")
     modlist_path = getattr(cfg, "MODLIST_FILE", "dumpids/modlist.json")
     entities_path = getattr(cfg, "ENTITIES_FILE", "dumpids/entities.json")
+    advancements_path = getattr(cfg, "ADVANCEMENTS_FILE", "dumpids/advancements.json")
+    fluids_path = getattr(cfg, "FLUIDS_FILE", "dumpids/fluids.json")
 
     _load_mcmod_cache()
 
@@ -1193,7 +1327,15 @@ def main():
     structures = load_structures(structs_path)
     entity_ids = list(load_entities(entities_path).keys())
 
-    log(f"[汇总] 物品 {len(item_ids)} | 结构 {len(structures)} | 实体 {len(entity_ids)} | 模组 {len(_modlist_map)}")
+    advancement_ids = []
+    fluid_ids = []
+    if enable_advancement:
+        advancement_ids = load_advancements(advancements_path)
+    if enable_fluid:
+        fluid_ids = load_fluids(fluids_path)
+
+    log(f"[汇总] 物品 {len(item_ids)} | 结构 {len(structures)} | 实体 {len(entity_ids)} "
+        f"| 进度 {len(advancement_ids)} | 流体 {len(fluid_ids)} | 模组 {len(_modlist_map)}")
 
     # ---- 生成整合包介绍章节 ----
     all_quests = []
@@ -1214,6 +1356,8 @@ def main():
                 batch, [], 0,
                 valid_structures=set(structures),
                 valid_entities=set(entity_ids),
+                valid_advancements=set(advancement_ids),
+                valid_fluids=set(fluid_ids),
                 allowed_types=["checkmark"],
             )
             for i, q in enumerate(intro_quests):
@@ -1229,6 +1373,13 @@ def main():
         log(f"\n----- 第 {ci+1}/{len(flat)} 章: {ch['title']} -----")
         ctx = chapter_context(ci)
 
+        # 根据运行时开关过滤章节允许的任务类型
+        chapter_allowed = list(ctx["task_types"])
+        if not enable_advancement and "advancement" in chapter_allowed:
+            chapter_allowed.remove("advancement")
+        if not enable_fluid and "fluid" in chapter_allowed:
+            chapter_allowed.remove("fluid")
+
         n_batches = ch.get("batches", 1)
         chapter_quests = []
 
@@ -1236,7 +1387,9 @@ def main():
             log(f"  [批次 {bi+1}/{n_batches}]")
             prompt = build_prompt(
                 item_ids, structures, entity_ids,
-                ci, bi, chapter_quests
+                ci, bi, chapter_quests,
+                advancement_ids if enable_advancement else None,
+                fluid_ids if enable_fluid else None,
             )
 
             batch = call_deepseek(prompt)
@@ -1248,7 +1401,9 @@ def main():
                 batch, chapter_quests, bi,
                 valid_structures=set(structures),
                 valid_entities=set(entity_ids),
-                allowed_types=ctx["task_types"],
+                valid_advancements=set(advancement_ids),
+                valid_fluids=set(fluid_ids),
+                allowed_types=chapter_allowed,
             )
 
             if not chapter_quests and cleaned:
