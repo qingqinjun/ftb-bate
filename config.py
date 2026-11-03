@@ -32,6 +32,16 @@ BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
 MODEL    = os.environ.get("LLM_MODEL", "deepseek-flash")
 
 
+# ==================== MC 百科补充 ====================
+# 让脚本访问 MC 百科，把物品/实体的中文名、简介补充进提示词
+# 【TODO】填入你实际可用的 MC 百科接口地址（mcmod.cn 无官方 API）
+ENABLE_MCMOD_LOOKUP = True                     # 总开关：False 则完全不请求 MC 百科
+MCMOD_API_BASE      = "https://mcmod.cn"       # 百科地址；有非官方 API 就换成实际地址
+MCMOD_TIMEOUT       = 10                       # 单次请求超时（秒）
+MCMOD_MAX_LOOKUP    = 8                        # 每批提示词最多查询几个 ID，控制请求量
+MCMOD_CACHE_FILE    = os.path.join(BASE_DIR, "mcmod_cache.json")  # 本地缓存，避免重复请求
+
+
 # ==================== 语言 ====================
 # "zh" = 中文任务标题/描述
 # "en" = English quest titles/descriptions

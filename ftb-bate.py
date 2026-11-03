@@ -10,13 +10,9 @@ ftb-bate —— FTB Quests 任务书自动生成器
   - 依赖循环检测与修复
   - 章节 icon 字段
   - 日志持久化
-  - 数据文件递归解包：支持任意嵌套，包括
-      {"total_entities": N, "entities": [...]}
-      {"data": {"entities": [...]}}
-      ["modid:id", ...]
-      {"modid:id": "中文名"}
-      [{"id": "...", "name": "..."}]
+  - 数据文件递归解包：支持任意嵌套
   - 任务语言切换（中文 / 英文），由 config.QUEST_LANGUAGE 控制
+  - ▼ MC 百科补充：按 config.MCMOD_* 开关查询，带本地缓存
 ========================================================
 """
 import json
@@ -64,6 +60,192 @@ def close_log():
         _LOG_FILE = None
 
 
+# ==================== ▼ MC百科：缓存与查询 ====================
+_mcmod_cache = {}
+_mcmod_cache_dirty = False
+
+
+def _load_mcmod_cache():
+    global _mcmod_cache, _mcmod_cache_dirty
+    path = getattr(cfg, "MCMOD_CACHE_FILE", None)
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _mcmod_cache = data
+            _mcmod_cache_dirty = False
+            log(f"[MC百科] 已加载缓存 {len(_mcmod_cache)} 条")
+    except Exception as e:
+        log(f"[MC百科] 缓存加载失败: {e}")
+
+
+def _save_mcmod_cache():
+    global _mcmod_cache_dirty
+    if not _mcmod_cache_dirty:
+        return
+    path = getattr(cfg, "MCMOD_CACHE_FILE", None)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_mcmod_cache, f, ensure_ascii=False, indent=2)
+        log(f"[MC百科] 缓存已保存 {len(_mcmod_cache)} 条 -> {path}")
+        _mcmod_cache_dirty = False
+    except Exception as e:
+        log(f"[MC百科] 缓存保存失败: {e}")
+
+
+def _extract_summary_from_html(html, keyword):
+    """从 MC 百科搜索页 HTML 中粗抽标题/简介，失败返回空串。"""
+    title = ""
+    m = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+    if m:
+        title = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+        title = re.sub(r"\s+", " ", title)
+
+    desc = ""
+    for pat in (
+        r'<meta\s+name="description"\s+content="([^"]*)"',
+        r'<meta\s+property="og:description"\s+content="([^"]*)"',
+        r'<meta\s+name="Description"\s+content="([^"]*)"',
+    ):
+        m = re.search(pat, html, re.I)
+        if m:
+            desc = m.group(1).strip()
+            break
+
+    if not title and not desc:
+        return ""
+    parts = [f"关键词 {keyword}"]
+    if title:
+        parts.append(f"页面标题: {title[:100]}")
+    if desc:
+        parts.append(f"简介: {desc[:200]}")
+    return "；".join(parts)
+
+
+def lookup_mcmod(keyword, timeout=None):
+    """
+    查询 MC 百科，返回补充文本；失败返回空字符串。
+    - 若 cfg.MCMOD_API_BASE 返回 JSON，按 JSON 解析 title/summary
+    - 若返回 HTML，用正则抽 title/description
+    - 结果写入 _mcmod_cache，标脏，run 结束时统一落盘
+    """
+    global _mcmod_cache_dirty
+    if not keyword:
+        return ""
+    if not getattr(cfg, "ENABLE_MCMOD_LOOKUP", False):
+        return ""
+    if keyword in _mcmod_cache:
+        return _mcmod_cache[keyword]
+
+    base = str(getattr(cfg, "MCMOD_API_BASE", "") or "").rstrip("/")
+    if not base:
+        _mcmod_cache[keyword] = ""
+        return ""
+
+    if timeout is None:
+        timeout = getattr(cfg, "MCMOD_TIMEOUT", 10)
+
+    try:
+        resp = requests.get(
+            base,
+            params={"q": keyword, "key": keyword, "search": keyword},
+            timeout=timeout,
+            headers={"User-Agent": "ftb-bate/1.0"},
+        )
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "").lower()
+
+        text = ""
+        if "json" in ctype:
+            try:
+                data = resp.json()
+                title = summary = ""
+                if isinstance(data, dict):
+                    title = data.get("title") or data.get("name") or ""
+                    summary = (
+                        data.get("summary")
+                        or data.get("desc")
+                        or data.get("description")
+                        or ""
+                    )
+                    if not (title or summary) and isinstance(data.get("data"), dict):
+                        d = data["data"]
+                        title = d.get("title") or d.get("name") or ""
+                        summary = (
+                            d.get("summary")
+                            or d.get("desc")
+                            or d.get("description")
+                            or ""
+                        )
+                parts = []
+                if title:
+                    parts.append(f"标题: {title}")
+                if summary:
+                    parts.append(f"简介: {str(summary)[:200]}")
+                if parts:
+                    text = "；".join(parts)
+            except Exception:
+                text = ""
+
+        if not text:
+            text = _extract_summary_from_html(resp.text, keyword)
+
+        _mcmod_cache[keyword] = text
+        _mcmod_cache_dirty = True
+        return text
+    except Exception as e:
+        log(f"  [MC百科] 查询 {keyword} 失败: {e}")
+        _mcmod_cache[keyword] = ""
+        _mcmod_cache_dirty = True
+        return ""
+
+
+def _build_mcmod_section(item_pool, entity_pool):
+    """拼出【MC百科补充资料】段落；无结果返回空串。"""
+    if not getattr(cfg, "ENABLE_MCMOD_LOOKUP", False):
+        return ""
+    max_n = int(getattr(cfg, "MCMOD_MAX_LOOKUP", 0) or 0)
+    if max_n <= 0:
+        return ""
+
+    candidates = []
+    for iid in item_pool:
+        if iid not in candidates:
+            candidates.append(iid)
+        if len(candidates) >= max_n:
+            break
+    if len(candidates) < max_n:
+        for eid in entity_pool:
+            if eid not in candidates:
+                candidates.append(eid)
+            if len(candidates) >= max_n:
+                break
+
+    if not candidates:
+        return ""
+
+    log(f"  [MC百科] 本批查询 {len(candidates)} 个 ID ...")
+    lines = []
+    for kw in candidates:
+        hint = lookup_mcmod(kw)
+        if hint:
+            lines.append(f"- {kw}: {hint}")
+
+    if not lines:
+        return ""
+    return (
+        "\n【MC百科补充资料】（仅供参考，据此让标题/描述更贴切，不要编造 ID）\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+# ==================== ▲ MC百科 ====================
+
+
 # ==================== 工具函数 ====================
 def gen_hex_id():
     return f"{random.getrandbits(64):016X}"
@@ -108,10 +290,7 @@ def _clean_str(s):
 
 
 def _find_data_array(data, known_keys, depth=0):
-    """
-    递归从任意嵌套结构中找出目标数组（实体/物品等）。
-    返回 (list_or_dict, 来源路径描述)。
-    """
+    """递归从任意嵌套结构中找出目标数组。"""
     if depth > 6:
         return None, ""
     if isinstance(data, list):
@@ -122,7 +301,6 @@ def _find_data_array(data, known_keys, depth=0):
                 inner, path = _find_data_array(data[key], known_keys, depth + 1)
                 if inner is not None:
                     return inner, f"{key}.{path}" if path else key
-        # 未知键名，找第一个 list 或 {id:name} 字典
         for k, v in data.items():
             if isinstance(v, list):
                 return v, f"{k}@{depth}"
@@ -135,10 +313,8 @@ def _find_data_array(data, known_keys, depth=0):
 
 # ==================== 数据解析 ====================
 def _parse_items(filepath):
-    """递归解包 items.json，支持字符串数组 / {id:name} 字典 / 对象数组。"""
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
-
     arr, _ = _find_data_array(
         data, ("items", "item", "data", "list", "result", "values")
     )
@@ -185,18 +361,8 @@ def _parse_modlist(filepath):
 
 
 def _parse_entities(filepath):
-    """
-    递归解析 entities_list.json：支持
-      {"total_entities": N, "entities": [...]}
-      {"data": {"entities": [...]}}
-      ["modid:entity", ...]
-      {"modid:entity": "中文名"}
-      [{"id": "...", "name": "..."}]
-    每条 strip()，只保留含 ":" 的合法 ID。
-    """
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
-
     arr, source = _find_data_array(
         data, ("entities", "entity", "data", "list", "items", "result", "values")
     )
@@ -204,7 +370,6 @@ def _parse_entities(filepath):
         log(f"  [警告] 无法从 entities_list.json 中找到实体数组"
             f"（顶层类型: {type(data).__name__}）")
         return {}
-
     result = {}
     if isinstance(arr, list):
         for entry in arr:
@@ -233,7 +398,6 @@ def _parse_entities(filepath):
             if not kid or ":" not in kid:
                 continue
             result[kid] = _clean_str(v) if isinstance(v, str) and v else kid
-
     log(f"  [解析] 实体数组来源: {source}，解析出 {len(result)} 条")
     return result
 
@@ -299,7 +463,8 @@ def chapter_context(chapter_index):
 
 
 # ==================== 提示词 ====================
-def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool):
+def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
+               entity_pool, mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -350,7 +515,7 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 
 【可用实体 ID】（kill 类型必须从以下列表**逐字复制**，禁止修改、禁止编造）：
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
-
+{mcmod_section}
 【输出格式】严格输出 JSON 数组，不要 Markdown 代码块，不要解释文字：
 [
   {{"key": "t1", "type": "item", "id": "modid:item_name", "title": "中文标题", "desc": "中文描述", "dependencies": []}},
@@ -369,7 +534,8 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 """
 
 
-def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool):
+def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
+               entity_pool, mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -420,7 +586,7 @@ Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}"
 
 [Available entity IDs] (kill quests MUST copy these verbatim, do NOT modify or invent):
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
-
+{mcmod_section}
 [Output format] Output ONLY a JSON array, no Markdown code block, no explanation:
 [
   {{"key": "t1", "type": "item", "id": "modid:item_name", "title": "English title", "desc": "English description", "dependencies": []}},
@@ -451,9 +617,14 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
     if not entity_pool and ctx["entity_prefixes"]:
         entity_pool = entity_ids[:30]
 
+    # ▼ MC百科：查前 N 个 ID，拼【MC百科补充资料】
+    mcmod_section = _build_mcmod_section(item_pool, entity_pool)
+
     if is_en():
-        return _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool)
-    return _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool, entity_pool)
+        return _prompt_en(ctx, chapter_index, batch_index, already,
+                          item_pool, struct_pool, entity_pool, mcmod_section)
+    return _prompt_zh(ctx, chapter_index, batch_index, already,
+                      item_pool, struct_pool, entity_pool, mcmod_section)
 
 
 # ==================== API 调用 ====================
@@ -548,7 +719,6 @@ def normalize_batch(batch, already, batch_index, valid_structures=None, valid_en
             "dependencies": deps,
         })
 
-    # 去重 key
     seen = set()
     for q in cleaned:
         base = q["key"]
@@ -558,12 +728,10 @@ def normalize_batch(batch, already, batch_index, valid_structures=None, valid_en
             q["key"] = f"{base}_{n}"
         seen.add(q["key"])
 
-    # 过滤无效依赖
     valid = existing_keys | {q["key"] for q in cleaned}
     for q in cleaned:
         q["dependencies"] = [d for d in q["dependencies"] if d in valid and d != q["key"]]
 
-    # 本章第一批根节点依赖清空
     if cleaned and not already:
         cleaned[0]["dependencies"] = []
 
@@ -572,16 +740,15 @@ def normalize_batch(batch, already, batch_index, valid_structures=None, valid_en
 
 # ==================== 依赖循环检测 ====================
 def break_cycles(quests):
-    """检测依赖图并断开循环，返回被断开的边数量。"""
     graph = {q["key"]: list(q["dependencies"]) for q in quests}
-    color = {k: 0 for k in graph}  # 0=白 1=灰 2=黑
+    color = {k: 0 for k in graph}
     removed = [0]
 
     def dfs(node):
         color[node] = 1
         for dep in list(graph[node]):
             c = color.get(dep, 0)
-            if c == 1:  # 回边
+            if c == 1:
                 graph[node].remove(dep)
                 removed[0] += 1
                 log(f"    [循环] 断开依赖: {node} -> {dep}")
@@ -610,7 +777,6 @@ def _reward_table_id(key):
 
 
 def build_reward_table_snbt(key):
-    """根据 cfg.REWARD_TABLES[key] 生成 reward_tables/<key>.snbt 内容。"""
     spec = cfg.REWARD_TABLES[key]
     entries = []
     for e in spec["entries"]:
@@ -629,7 +795,6 @@ def build_reward_table_snbt(key):
 
 
 def build_reward_snbt(quest_type, table_id):
-    """为任务生成奖励 SNBT 片段。"""
     rewards = []
     if quest_type == "structure":
         xp = random.choice([30, 40, 50, 60])
@@ -701,7 +866,6 @@ def generate_chapter_snbt(chapter_index, quests, group_id):
 
     key_to_id = {q["key"]: ID_POOL.new() for q in quests}
 
-    # 选择奖励表
     if ctx["use_structures"]:
         rtable_key = "structure"
     elif chapter_index >= cfg.TOTAL_CHAPTERS - 1:
@@ -735,7 +899,6 @@ def generate_chapter_snbt(chapter_index, quests, group_id):
 
 # ==================== 章节组 / 全局配置 ====================
 def generate_chapter_groups():
-    """生成 chapter_groups.snbt，返回每组的 group_id 列表。"""
     group_ids = []
     parts = []
     for g in cfg.CHAPTER_GROUPS:
@@ -792,7 +955,6 @@ def generate_chapter(item_ids, structures, entity_ids, chapter_index):
         all_quests.extend(cleaned)
         log(f"    本批 {len(cleaned)} 个，累计 {len(all_quests)} 个")
 
-    # 循环检测
     n_cycles = break_cycles(all_quests)
     if n_cycles:
         log(f"    [修复] 断开 {n_cycles} 条循环依赖")
@@ -807,6 +969,7 @@ def main():
         log("=" * 60)
         log(" ftb-bate · FTB Quests 任务书自动生成器")
         log(f" 语言: {'English' if is_en() else '中文'}")
+        log(f" MC百科: {'开启' if getattr(cfg, 'ENABLE_MCMOD_LOOKUP', False) else '关闭'}")
         log("=" * 60)
 
         if not cfg.API_KEY:
@@ -815,6 +978,9 @@ def main():
         if cfg.TOTAL_CHAPTERS <= 0:
             log("[错误] CHAPTER_GROUPS 中没有章节")
             sys.exit(1)
+
+        # ▼ MC百科：启动时载入缓存
+        _load_mcmod_cache()
 
         log("\n[步骤 1/6] 加载数据文件...")
         items = load_items(cfg.ITEMS_FILE)
@@ -878,6 +1044,8 @@ def main():
         log("   进游戏执行 /ftbquests reload")
         log("=" * 60)
     finally:
+        # ▼ MC百科：退出前落盘缓存
+        _save_mcmod_cache()
         close_log()
 
 
