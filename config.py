@@ -10,16 +10,13 @@ config.py —— ftb-bate 配置文件（IdDumper 模组适配版）
 import os
 
 # ==================== 路径 ====================
-# 【TODO】改成你 4 个导出文件所在的目录
-# IdDumper 的导出文件在【存档目录/dumpids/】下
+# 【TODO】改成你导出文件所在的目录
 BASE_DIR = "/storage/emulated/0/Download/py/dumpids"
 
 MODLIST_FILE      = os.path.join(BASE_DIR, "modlist.json")
 ITEMS_FILE        = os.path.join(BASE_DIR, "items.json")
 STRUCTURES_FILE   = os.path.join(BASE_DIR, "structures.json")
 ENTITIES_FILE     = os.path.join(BASE_DIR, "entities.json")
-ADVANCEMENTS_FILE = os.path.join(BASE_DIR, "advancements.json")   # 新增
-FLUIDS_FILE       = os.path.join(BASE_DIR, "fluids.json")         # 新增
 
 OUTPUT_DIR          = os.path.join(BASE_DIR, "output")
 CHAPTERS_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "chapters")
@@ -121,13 +118,12 @@ DIFFICULTY_TIERS = {
     },
 }
 
+# 只保留 FTB Quests 原生支持的四种任务类型
 TASK_TYPE_DIFFICULTY = {
     "checkmark":   1,
     "item":        2,
     "kill":        3,
     "structure":   4,
-    "advancement": 3,   # 新增
-    "fluid":       2,   # 新增
 }
 
 COUNT_DIFFICULTY_FACTOR = 0.3
@@ -178,7 +174,7 @@ CHAPTER_GROUPS = [
                 "item_prefixes": [],
                 "entity_prefixes": [],
                 "use_structures": False,
-                "task_types": ["item", "checkmark"],
+                "task_types": ["item", "checkmark"], # 如果需要击杀/结构，自行在此添加
                 "icon": "",
                 "batches": 1,
             },
