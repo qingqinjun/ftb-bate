@@ -1,20 +1,15 @@
-基于你自己做的 IdDumper 模组，我已经把这份教程重写并优化了。现在完全不需要再去下载和安装那 4 个第三方模组了，直接用你写的 iddumper 导出的 JSON 文件即可。
-
-因为你的脚本现在已经支持直接读取 JSON，所以教程变得非常简洁。以下是专为你现在这套流程定制的全新操作指南：
-
----
-
 FTB Quests 任务书自动生成器（IdDumper 专属版）从零跑通教程
 
 这套教程分为三个阶段：准备数据（你的模组） → 配置环境（Termux） → 修改代码并运行。
+完全不需要安装第三方模组，直接使用 IdDumper 导出的 JSON 数据。
 
 阶段 A：使用 IdDumper 导出数据
 
 A1. 准备游戏环境
 
 1. 确保你的 Minecraft 是 1.20.1 版本。
-2. 如果你玩的是 Fabric 端，请安装 Fabric API 以及你做的 iddumper-1.0.0.jar。
-3. 如果你玩的是 Forge 端，直接把 iddumper-1.0.0.jar 放进 mods 文件夹。
+2. 如果你玩的是 Fabric 端，请安装 Fabric API 以及你做的 iddumper-fabric-1.20.1.jar。
+3. 如果你玩的是 Forge 端，直接把 iddumper-forge-1.20.1.jar 放进 mods 文件夹。
 
 A2. 游戏内执行指令
 进入任意一个存档（确保开启了作弊/你是OP），在聊天框输入：
@@ -26,16 +21,14 @@ A2. 游戏内执行指令
 执行后，聊天框会提示：§aID 导出完成: <路径>。
 
 A3. 转移文件到工作目录
-去你的存档目录下（通常是 saves/你的存档名/dumpids/），找到这 6 个文件：
+去你的存档目录下（通常是 saves/你的存档名/dumpids/），找到核心的 4 个 JSON 文件：
 
 · items.json（物品）
 · entities.json（实体）
 · structures.json（结构）
 · modlist.json（模组列表）
-· advancements.json（进度/成就，可选）
-· fluids.json（流体，可选）
 
-在手机存储里新建一个文件夹 py，把这 6 个文件全部移动过去：
+在手机存储里新建一个文件夹 py，把这 4 个文件移动过去，并放入你的 Python 脚本：
 
 ```text
 /storage/emulated/0/Download/py/
@@ -44,8 +37,7 @@ A3. 转移文件到工作目录
 ├── items.json
 ├── entities.json
 ├── structures.json
-├── modlist.json
-└── (以及可选的两个 json)
+└── modlist.json
 ```
 
 ---
@@ -92,19 +84,16 @@ C1. 修改 config.py（非常关键）
 用文本编辑器打开 config.py，找到路径部分。保证路径与你存放 json 文件的路径完全一致：
 
 ```python
-BASE_DIR = "/storage/emulated/0/Download/py/dumpids"
-# 如果你的文件直接放在了 py 根目录，就改成 "/storage/emulated/0/Download/py"
+BASE_DIR = "/storage/emulated/0/Download/py"
 ```
 
-确保下面的几行能正确指向文件名（如果文件直接在 py 目录，去掉 dumpids/）：
+确保下面的几行能正确指向你的文件：
 
 ```python
-MODLIST_FILE      = os.path.join(BASE_DIR, "modlist.json")
-ITEMS_FILE        = os.path.join(BASE_DIR, "items.json")
-STRUCTURES_FILE   = os.path.join(BASE_DIR, "structures.json")
-ENTITIES_FILE     = os.path.join(BASE_DIR, "entities.json")
-ADVANCEMENTS_FILE = os.path.join(BASE_DIR, "advancements.json")
-FLUIDS_FILE       = os.path.join(BASE_DIR, "fluids.json")
+MODLIST_FILE    = os.path.join(BASE_DIR, "modlist.json")
+ITEMS_FILE      = os.path.join(BASE_DIR, "items.json")
+STRUCTURES_FILE = os.path.join(BASE_DIR, "structures.json")
+ENTITIES_FILE   = os.path.join(BASE_DIR, "entities.json")
 ```
 
 C2. 填写章节信息
@@ -117,14 +106,8 @@ cd /storage/emulated/0/Download/py
 python ftb-bate.py
 ```
 
-C4. 交互询问
-程序启动后，会问你两个问题：
-
-1. 是否允许生成【成就/进度】类型任务？ [y/N]: 
-   (如果你导出了 advancements.json，且你的 FTB Quests 支持成就任务，输入 y)
-2. 是否允许生成【流体】类型任务？ [y/N]: 
-   (输入 y 或 n)
-
+C4. 自动生成过程
+程序启动后会直接读取数据并请求 AI 生成任务，不再有任何询问交互。
 等待 AI 跑完，你会在 py 目录下看到生成的 output 文件夹，里面有 quests.json 和 reward_tables.snbt。
 
 ---
@@ -136,9 +119,7 @@ C4. 交互询问
    · 解决：在 Termux 里运行 ls /storage/emulated/0/Download/py，亲眼确认那几个 .json 文件就在那里。
 2. API 调用报 401 错误
    · 原因：Key 没有设置，或者 export 的窗口失效了。
-   · 解决：重新 export DEEPSEEK_API_KEY="..."。
-3. 导入游戏提示“未知任务类型”
-   · 原因：FTB Quests 原版可能不支持 advancement 或 fluid 类型的任务。
-   · 解决：在 config.py 的 CHAPTER_GROUPS 里，把 task_types 里面的 "advancement" 或 "fluid" 删掉，只保留 ["item", "checkmark", "structure", "kill"]。运行脚本时对应问题也选 n。
-
-(如果你不想手动改，可以把主体和配置文件、以及这个教程全喂给 AI，让 AI 根据你的实际游戏路径和想法全自动改好。)
+   · 解决：重新 export DEEPSEEK_API_KEY="..." 并确认 echo 有输出。
+3. API 请求超时或报错
+   · 原因：网络波动，或者 API 接口临时抽风。
+   · 解决：检查手机网络，重新运行脚本即可（脚本自带重试机制）。
