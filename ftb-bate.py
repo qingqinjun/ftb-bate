@@ -5,7 +5,7 @@ ftb-bate —— FTB Quests 任务书自动生成器--本程序完全免费
 ========================================================
 支持：
   - 章节组 / 章节 / 任务三层结构
-  - item / checkmark / structure / kill 四种任务类型
+  - item / checkmark / structure / kill / advancement / fluid 六种任务类型
   - 真实 reward_tables 生成，random 奖励引用真实表
   - 奖励物品优先从 items.json 动态构建
   - 依赖循环检测与修复
@@ -14,8 +14,9 @@ ftb-bate —— FTB Quests 任务书自动生成器--本程序完全免费
   - 日志持久化
   - 数据文件递归解包
   - 任务语言切换（zh / en）
-  - MC 百科：模组级攻略补充，优先读 modlist.txt 的模组中文名
-  - 【新增】奖励跟随任务难度动态变化
+  - MC 百科：模组级攻略补充，优先读 modlist 的模组中文名
+  - 奖励跟随任务难度动态变化
+  - 【新增】成就任务、流体任务可在运行时选择是否启用
 ========================================================
 """
 import json
@@ -66,7 +67,7 @@ def close_log():
         _LOG_FILE = None
 
 
-# ==================== ▼ MC百科：模组级攻略补充 ====================
+# ==================== ▼ MC百科 ====================
 _mcmod_cache = {}
 _mcmod_cache_dirty = False
 _modlist_map = {}   # modid -> 模组名
@@ -134,7 +135,6 @@ def _extract_summary_from_html(html, keyword):
 
 
 def _cn_keyword(keyword):
-    """modid:item -> 模组中文名 item；用于 MC 百科模组级搜索。"""
     if ":" not in keyword:
         return keyword
     prefix, rest = keyword.split(":", 1)
@@ -216,7 +216,6 @@ def lookup_mcmod(keyword, timeout=None):
 
 
 def _build_mcmod_section(item_pool, entity_pool):
-    """只对模组级查询：把一批 ID 按 modid 去重，每个 modid 查一次。"""
     if not getattr(cfg, "ENABLE_MCMOD_LOOKUP", False):
         return ""
     max_n = int(getattr(cfg, "MCMOD_MAX_LOOKUP", 0) or 0)
@@ -353,35 +352,39 @@ def _parse_items(filepath):
 
 
 def _parse_structures(filepath):
+    """读 structures.json（字符串数组），返回 ID 列表。"""
     with open(filepath, "r", encoding="utf-8") as f:
-        lines = [line.strip() for line in f if line.strip()]
-    return [l for l in lines if ":" in l and not l.startswith("#")]
+        data = json.load(f)
+    arr = None
+    if isinstance(data, list):
+        arr = data
+    elif isinstance(data, dict):
+        arr, _ = _find_data_array(data, ("structures", "structure", "data", "list"))
+    if not arr:
+        return []
+    out = []
+    for e in arr:
+        s = _clean_str(e)
+        if s and ":" in s:
+            out.append(s)
+    return out
 
 
 def _parse_modlist(filepath):
-    """解析 modlist.txt，返回 dict: modid -> 模组名。"""
-    modid_to_name = {}
-    pat = re.compile(
-        r'^\s*(?P<name>.+?)\s{2,}(?P<modid>[a-z_0-9]+)\s{2,}(?P<ver>[^\s<]+)?'
-    )
+    """读 modlist.json（{modid: "name | version"}），返回 modid -> 模组名。"""
     with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not line.strip():
+        data = json.load(f)
+    result = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            kid = _clean_str(k)
+            if not kid:
                 continue
-            stripped = line.lstrip()
-            if stripped.startswith("Название") or stripped.startswith("---"):
-                continue
-            m = pat.match(line)
-            if not m:
-                continue
-            name = m.group("name").strip()
-            modid = m.group("modid").strip()
-            if not modid or ":" in modid:
-                continue
-            if name and modid and modid not in modid_to_name:
-                modid_to_name[modid] = name
-    return modid_to_name
+            name = _clean_str(v)
+            if "|" in name:
+                name = name.split("|", 1)[0].strip()
+            result[kid] = name or kid
+    return result
 
 
 def _parse_entities(filepath):
@@ -425,6 +428,32 @@ def _parse_entities(filepath):
     return result
 
 
+def _parse_advancements(filepath):
+    """读 advancements.json（字符串数组），返回进度 ID 列表。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    arr = data if isinstance(data, list) else []
+    out = []
+    for e in arr:
+        s = _clean_str(e)
+        if s and ":" in s:
+            out.append(s)
+    return out
+
+
+def _parse_fluids(filepath):
+    """读 fluids.json（字符串数组），返回流体 ID 列表。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    arr = data if isinstance(data, list) else []
+    out = []
+    for e in arr:
+        s = _clean_str(e)
+        if s and ":" in s:
+            out.append(s)
+    return out
+
+
 def load_items(filepath):
     data = load_file_with_retry(filepath, _parse_items, "items.json")
     if data is None:
@@ -434,26 +463,42 @@ def load_items(filepath):
 
 
 def load_structures(filepath):
-    data = load_file_with_retry(filepath, _parse_structures, "structure_dump.txt")
+    data = load_file_with_retry(filepath, _parse_structures, "structures.json")
     if data is None:
         return []
-    log(f"[加载] structure_dump.txt: {len(data)} 个结构")
+    log(f"[加载] structures.json: {len(data)} 个结构")
     return data
 
 
 def load_modlist(filepath):
-    data = load_file_with_retry(filepath, _parse_modlist, "modlist.txt")
+    data = load_file_with_retry(filepath, _parse_modlist, "modlist.json")
     if data is None:
         return {}
-    log(f"[加载] modlist.txt: {len(data)} 个模组名映射")
+    log(f"[加载] modlist.json: {len(data)} 个模组名映射")
     return data
 
 
 def load_entities(filepath):
-    data = load_file_with_retry(filepath, _parse_entities, "entities_list.json")
+    data = load_file_with_retry(filepath, _parse_entities, "entities.json")
     if data is None:
         return {}
-    log(f"[加载] entities_list.json: {len(data)} 个实体")
+    log(f"[加载] entities.json: {len(data)} 个实体")
+    return data
+
+
+def load_advancements(filepath):
+    data = load_file_with_retry(filepath, _parse_advancements, "advancements.json")
+    if data is None:
+        return []
+    log(f"[加载] advancements.json: {len(data)} 个进度")
+    return data
+
+
+def load_fluids(filepath):
+    data = load_file_with_retry(filepath, _parse_fluids, "fluids.json")
+    if data is None:
+        return []
+    log(f"[加载] fluids.json: {len(data)} 个流体")
     return data
 
 
@@ -466,7 +511,6 @@ def filter_by_prefix(ids, prefixes):
 
 # ==================== 图标校验 ====================
 def resolve_icon(icon, valid_items):
-    """章节 icon 校验：为空或不在 items.json 时回退 ICON_FALLBACK。"""
     icon = _clean_str(icon)
     fallback = getattr(cfg, "ICON_FALLBACK", "minecraft:book")
     if not icon:
@@ -496,7 +540,8 @@ def chapter_context(chapter_index):
 
 # ==================== 提示词 ====================
 def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
-               entity_pool, allowed, mcmod_section=""):
+               entity_pool, allowed, advancement_pool=None, fluid_pool=None,
+               mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -520,14 +565,30 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         type_lines.append('structure 类型：必须从【可用结构 ID】中选择真实 "id"')
     if "kill" in allowed:
         type_lines.append('kill 类型：必须从【可用实体 ID】逐字复制 "id"，并给 "count"')
+    if "advancement" in allowed:
+        type_lines.append('advancement 类型：必须从【可用进度 ID】中逐字复制 "id"')
+    if "fluid" in allowed:
+        type_lines.append('fluid 类型：必须从【可用流体 ID】中逐字复制 "id"')
     type_hint = "本章允许的任务类型：\n- " + "\n- ".join(type_lines)
 
-    # 难度感知：批次越靠后难度越高
     difficulty_hint = (
         f"【难度感知】当前是第 {batch_index + 1} 批，"
         f"批次越靠后任务应越难（count 更大、依赖更深、优先用高难度任务类型）。"
         f"奖励会根据难度自动调整。"
     )
+
+    adv_block = ""
+    if advancement_pool and "advancement" in allowed:
+        adv_block = (
+            "\n【可用进度 ID】（advancement 类型必须逐字复制）：\n"
+            + json.dumps(advancement_pool[:80], ensure_ascii=False)
+        )
+    fluid_block = ""
+    if fluid_pool and "fluid" in allowed:
+        fluid_block = (
+            "\n【可用流体 ID】（fluid 类型必须逐字复制）：\n"
+            + json.dumps(fluid_pool[:60], ensure_ascii=False)
+        )
 
     return f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
 
@@ -552,13 +613,17 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 
 【可用实体 ID】（kill 类型必须逐字复制）：
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
+{adv_block}
+{fluid_block}
 {mcmod_section}
 【输出格式】严格输出 JSON 数组，不要 Markdown 代码块：
 [
   {{"key": "t1", "type": "item", "id": "modid:item_name", "count": 5, "title": "中文标题", "desc": "中文描述", "dependencies": []}},
   {{"key": "t2", "type": "checkmark", "title": "中文标题", "desc": "中文描述", "dependencies": ["t1"]}},
   {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "中文标题", "desc": "中文描述", "dependencies": ["t2"]}},
-  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "中文标题", "desc": "中文描述", "dependencies": []}}
+  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "中文标题", "desc": "中文描述", "dependencies": []}},
+  {{"key": "t5", "type": "advancement", "id": "minecraft:story/mine_stone", "title": "中文标题", "desc": "中文描述", "dependencies": []}},
+  {{"key": "t6", "type": "fluid", "id": "minecraft:water", "title": "中文标题", "desc": "中文描述", "dependencies": []}}
 ]
 
 规则：
@@ -567,12 +632,13 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 - {type_hint}
 - dependencies 是 key 数组，可为空
 - title ≤ 12 字，desc ≤ 30 字
-- 绝对不要编造物品、结构或实体 ID
+- 绝对不要编造物品、结构、实体、进度或流体 ID
 """
 
 
 def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
-               entity_pool, allowed, mcmod_section=""):
+               entity_pool, allowed, advancement_pool=None, fluid_pool=None,
+               mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -595,6 +661,10 @@ def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         type_lines.append('structure quest: "id" MUST be a real structure ID')
     if "kill" in allowed:
         type_lines.append('kill quest: "id" MUST be copied verbatim; add integer "count"')
+    if "advancement" in allowed:
+        type_lines.append('advancement quest: "id" MUST be copied verbatim from advancement IDs')
+    if "fluid" in allowed:
+        type_lines.append('fluid quest: "id" MUST be copied verbatim from fluid IDs')
     type_hint = "Allowed quest types:\n- " + "\n- ".join(type_lines)
 
     difficulty_hint = (
@@ -602,6 +672,19 @@ def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         f"(higher count, deeper dependencies, prefer harder task types). "
         f"Rewards scale with difficulty automatically."
     )
+
+    adv_block = ""
+    if advancement_pool and "advancement" in allowed:
+        adv_block = (
+            "\n[Available advancement IDs] (copy verbatim):\n"
+            + json.dumps(advancement_pool[:80], ensure_ascii=False)
+        )
+    fluid_block = ""
+    if fluid_pool and "fluid" in allowed:
+        fluid_block = (
+            "\n[Available fluid IDs] (copy verbatim):\n"
+            + json.dumps(fluid_pool[:60], ensure_ascii=False)
+        )
 
     return f"""You are a Minecraft FTB Quests designer. {cfg.PACK_INTRO}
 
@@ -626,13 +709,17 @@ Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}"
 
 [Available entity IDs]:
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
+{adv_block}
+{fluid_block}
 {mcmod_section}
 [Output format] Output ONLY a JSON array, no Markdown:
 [
   {{"key": "t1", "type": "item", "id": "modid:item_name", "count": 5, "title": "English title", "desc": "English description", "dependencies": []}},
   {{"key": "t2", "type": "checkmark", "title": "English title", "desc": "English description", "dependencies": ["t1"]}},
   {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "English title", "desc": "English description", "dependencies": ["t2"]}},
-  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "English title", "desc": "English description", "dependencies": []}}
+  {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "English title", "desc": "English description", "dependencies": []}},
+  {{"key": "t5", "type": "advancement", "id": "minecraft:story/mine_stone", "title": "English title", "desc": "English description", "dependencies": []}},
+  {{"key": "t6", "type": "fluid", "id": "minecraft:water", "title": "English title", "desc": "English description", "dependencies": []}}
 ]
 
 Rules:
@@ -646,7 +733,8 @@ Rules:
 """
 
 
-def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, already):
+def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index,
+                 already, advancement_ids=None, fluid_ids=None):
     ctx = chapter_context(chapter_index)
 
     allowed = list(ctx["task_types"])
@@ -654,6 +742,10 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
         allowed.remove("structure")
     if not entity_ids and "kill" in allowed:
         allowed.remove("kill")
+    if (not advancement_ids) and "advancement" in allowed:
+        allowed.remove("advancement")
+    if (not fluid_ids) and "fluid" in allowed:
+        allowed.remove("fluid")
     if not allowed:
         allowed = ["item", "checkmark"]
 
@@ -669,9 +761,11 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
 
     if is_en():
         return _prompt_en(ctx, chapter_index, batch_index, already,
-                          item_pool, struct_pool, entity_pool, allowed, mcmod_section)
+                          item_pool, struct_pool, entity_pool, allowed,
+                          advancement_ids, fluid_ids, mcmod_section)
     return _prompt_zh(ctx, chapter_index, batch_index, already,
-                      item_pool, struct_pool, entity_pool, allowed, mcmod_section)
+                      item_pool, struct_pool, entity_pool, allowed,
+                      advancement_ids, fluid_ids, mcmod_section)
 
 
 # ==================== 整合包介绍章节提示词 ====================
@@ -770,9 +864,12 @@ def call_deepseek(prompt, max_retries=3):
 # ==================== 结果清洗 ====================
 def normalize_batch(batch, already, batch_index,
                     valid_structures=None, valid_entities=None,
+                    valid_advancements=None, valid_fluids=None,
                     allowed_types=None):
     valid_structures = set(valid_structures or [])
     valid_entities   = set(valid_entities or [])
+    valid_advancements = set(valid_advancements or [])
+    valid_fluids     = set(valid_fluids or [])
     allowed_types    = set(allowed_types or ["item", "checkmark"])
 
     cleaned = []
@@ -807,8 +904,14 @@ def normalize_batch(batch, already, batch_index,
                 count = max(1, int(q.get("count", 1)))
             except (TypeError, ValueError):
                 count = 1
+        elif (raw_type == "advancement" and raw_id
+              and raw_id in valid_advancements and "advancement" in allowed_types):
+            qtype, qid = "advancement", raw_id
+        elif (raw_type == "fluid" and raw_id
+              and raw_id in valid_fluids and "fluid" in allowed_types):
+            qtype, qid = "fluid", raw_id
         else:
-            if raw_type in ("structure", "kill") and raw_id:
+            if raw_type in ("structure", "kill", "advancement", "fluid") and raw_id:
                 log(f"    [警告] {raw_type} ID 无效或未被允许: {raw_id}，降级为 checkmark")
             qtype, qid, count = "checkmark", "", None
 
@@ -963,65 +1066,28 @@ def build_reward_table_snbt(key, item_pool=None):
 }}'''
 
 
-# ============================================================
-# ================== ▼ 难度奖励系统（新增） ==================
-# ============================================================
-
+# ==================== 难度奖励系统 ====================
 def _default_difficulty_tiers():
-    """返回默认难度等级配置"""
     return {
-        "trivial": {
-            "weight_range": (1, 2),
-            "item_count_range": (1, 2),
-            "reward_tables_ref": ["common"],
-            "description": "简单任务",
-        },
-        "easy": {
-            "weight_range": (2, 4),
-            "item_count_range": (2, 4),
-            "reward_tables_ref": ["common", "uncommon"],
-            "description": "普通任务",
-        },
-        "medium": {
-            "weight_range": (3, 6),
-            "item_count_range": (3, 6),
-            "reward_tables_ref": ["uncommon", "rare"],
-            "description": "中等任务",
-        },
-        "hard": {
-            "weight_range": (5, 10),
-            "item_count_range": (5, 10),
-            "reward_tables_ref": ["rare", "epic"],
-            "description": "困难任务",
-        },
-        "extreme": {
-            "weight_range": (8, 16),
-            "item_count_range": (8, 20),
-            "reward_tables_ref": ["epic", "legendary"],
-            "description": "极限任务",
-        },
+        "trivial": {"weight_range": (1, 2), "item_count_range": (1, 2),
+                    "reward_tables_ref": ["common"], "description": "简单任务"},
+        "easy": {"weight_range": (2, 4), "item_count_range": (2, 4),
+                 "reward_tables_ref": ["common", "uncommon"], "description": "普通任务"},
+        "medium": {"weight_range": (3, 6), "item_count_range": (3, 6),
+                   "reward_tables_ref": ["uncommon", "rare"], "description": "中等任务"},
+        "hard": {"weight_range": (5, 10), "item_count_range": (5, 10),
+                 "reward_tables_ref": ["rare", "epic"], "description": "困难任务"},
+        "extreme": {"weight_range": (8, 16), "item_count_range": (8, 20),
+                    "reward_tables_ref": ["epic", "legendary"], "description": "极限任务"},
     }
 
 
 def _default_task_type_difficulty():
-    """返回默认任务类型基础难度"""
-    return {
-        "checkmark": 1,
-        "item": 2,
-        "kill": 3,
-        "structure": 4,
-    }
+    return {"checkmark": 1, "item": 2, "kill": 3, "structure": 4,
+            "advancement": 3, "fluid": 2}
 
 
 def calc_task_difficulty(quest, all_quests):
-    """
-    计算单个任务的难度值（1-5）。
-    评分维度：
-      1. 任务类型基础分
-      2. count 贡献（count * COUNT_DIFFICULTY_FACTOR）
-      3. 依赖深度贡献（depth * DEP_DEPTH_WEIGHT）
-      4. 稀有模组加成（modid 在 RARE_MOD_PREFIXES 中 +1）
-    """
     if not getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
         return 1
 
@@ -1029,17 +1095,14 @@ def calc_task_difficulty(quest, all_quests):
                             _default_task_type_difficulty())
     type_base = type_base_map.get(quest["type"], 2)
 
-    # count 贡献
     count_factor = getattr(cfg, "COUNT_DIFFICULTY_FACTOR", 0.3)
     count_val = quest.get("count") or 1
     count_score = count_val * count_factor
 
-    # 依赖深度
     depth_weight = getattr(cfg, "DEP_DEPTH_WEIGHT", 0.5)
     depth = _calc_dep_depth(quest, all_quests)
     depth_score = depth * depth_weight
 
-    # 稀有模组加成
     rare_mods = getattr(cfg, "RARE_MOD_PREFIXES", [])
     mod_bonus = 0
     qid = quest.get("id", "")
@@ -1050,7 +1113,6 @@ def calc_task_difficulty(quest, all_quests):
 
     raw = type_base + count_score + depth_score + mod_bonus
 
-    # 映射到 1-5
     if raw <= 1.5:
         return 1
     elif raw <= 2.5:
@@ -1064,7 +1126,6 @@ def calc_task_difficulty(quest, all_quests):
 
 
 def _calc_dep_depth(quest, all_quests):
-    """计算任务在依赖图中的最大深度"""
     key_to_quest = {q["key"]: q for q in all_quests}
     visited = set()
     max_depth = 0
@@ -1085,31 +1146,16 @@ def _calc_dep_depth(quest, all_quests):
 
 
 def difficulty_to_tier_name(difficulty):
-    """难度值 1-5 -> 等级名"""
-    mapping = {
-        1: "trivial",
-        2: "easy",
-        3: "medium",
-        4: "hard",
-        5: "extreme",
-    }
-    return mapping.get(difficulty, "easy")
+    return {1: "trivial", 2: "easy", 3: "medium", 4: "hard", 5: "extreme"}.get(difficulty, "easy")
 
 
 def _tier_for_difficulty(difficulty):
-    """根据难度值获取等级配置"""
     tiers = getattr(cfg, "DIFFICULTY_TIERS", _default_difficulty_tiers())
     tier_name = difficulty_to_tier_name(difficulty)
     return tiers.get(tier_name, tiers.get("easy", {}))
 
 
 def _select_reward_items_for_tier(tier, item_pool, fallback_pool):
-    """
-    根据等级配置选择奖励物品。
-    策略：
-      - 物品数量 = tier.item_count_range 内随机
-      - 优先从 item_pool 选，不够时混入 fallback_pool
-    """
     lo, hi = tier.get("item_count_range", (1, 3))
     n = random.randint(int(lo), max(int(lo), int(hi)))
 
@@ -1130,10 +1176,6 @@ def _select_reward_items_for_tier(tier, item_pool, fallback_pool):
 
 
 def _build_single_reward_table(quest, difficulty, item_pool, fallback_pool):
-    """
-    为单个任务构建一张专属奖励表 SNBT。
-    返回 (table_id, snbt, tier_name)
-    """
     tier = _tier_for_difficulty(difficulty)
     tier_name = difficulty_to_tier_name(difficulty)
     table_id = _reward_table_id(f"diff_{quest['key']}_{difficulty}")
@@ -1151,7 +1193,6 @@ def _build_single_reward_table(quest, difficulty, item_pool, fallback_pool):
                 f'{{type:"item",item:"{iid}",count:{cnt},weight:{w}}}'
             )
     else:
-        # 兜底：至少给一个经验瓶
         entries.append(
             f'{{type:"item",item:"minecraft:experience_bottle",count:1,weight:1}}'
         )
@@ -1171,17 +1212,6 @@ def _build_single_reward_table(quest, difficulty, item_pool, fallback_pool):
 
 
 def assign_difficulty_rewards(quests, item_pool):
-    """
-    为所有任务分配基于难度的奖励。
-
-    参数:
-        quests: 所有任务列表
-        item_pool: 可用物品 ID 池
-
-    返回:
-        dict: {quest_key: {"table_id": str, "snbt": str,
-                           "difficulty": int, "tier": str}}
-    """
     if not getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
         return {}
 
@@ -1216,14 +1246,6 @@ def assign_difficulty_rewards(quests, item_pool):
 
 
 def build_difficulty_reward_tables(quests, item_pool):
-    """
-    批量生成所有难度奖励表。
-
-    返回:
-        tuple: (reward_tables_dict, quest_reward_map)
-          - reward_tables_dict: {table_id: snbt} 用于写入 reward_tables 文件
-          - quest_reward_map: {quest_key: table_id} 用于任务引用
-    """
     reward_map = assign_difficulty_rewards(quests, item_pool)
 
     tables = {}
@@ -1236,17 +1258,6 @@ def build_difficulty_reward_tables(quests, item_pool):
 
 
 def attach_rewards_to_quests(quests, item_pool):
-    """
-    便捷函数：计算难度奖励并挂载到任务对象上。
-    每个任务会增加 "reward_table_id" 字段。
-
-    参数:
-        quests: 所有任务列表（会被原地修改）
-        item_pool: 可用物品 ID 池
-
-    返回:
-        dict: {table_id: snbt} 所有生成的奖励表
-    """
     if not getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
         return {}
 
@@ -1259,9 +1270,21 @@ def attach_rewards_to_quests(quests, item_pool):
     return tables
 
 
-# ============================================================
-# ================== ▲ 难度奖励系统 ==========================
-# ============================================================
+# ==================== 运行时开关询问 ====================
+def ask_yes_no(question, default=False):
+    hint = "[Y/n]" if default else "[y/N]"
+    while True:
+        try:
+            ans = input(f"{question} {hint}: ").strip().lower()
+        except EOFError:
+            return default
+        if not ans:
+            return default
+        if ans in ("y", "yes", "是", "1"):
+            return True
+        if ans in ("n", "no", "否", "0"):
+            return False
+        print("  请输入 y 或 n")
 
 
 # ==================== 主流程 ====================
@@ -1276,11 +1299,24 @@ def main():
     log(f"[语言] {'English' if is_en() else '中文'}")
     log(f"[难度奖励] {'开启' if getattr(cfg, 'ENABLE_DIFFICULTY_REWARDS', True) else '关闭'}")
 
+    # ---- 运行时询问：是否启用成就 / 流体任务 ----
+    log(f"\n===== 任务类型开关 =====")
+    enable_advancement = ask_yes_no(
+        "是否允许生成【成就/进度】类型任务？", default=False
+    )
+    enable_fluid = ask_yes_no(
+        "是否允许生成【流体】类型任务？", default=False
+    )
+    log(f"[开关] 成就任务: {'开启' if enable_advancement else '关闭'}")
+    log(f"[开关] 流体任务: {'开启' if enable_fluid else '关闭'}")
+
     # ---- 加载数据 ----
-    items_path = getattr(cfg, "ITEMS_FILE", "data/items.json")
-    structs_path = getattr(cfg, "STRUCTURES_FILE", "data/structure_dump.txt")
-    modlist_path = getattr(cfg, "MODLIST_FILE", "data/modlist.txt")
-    entities_path = getattr(cfg, "ENTITIES_FILE", "data/entities_list.json")
+    items_path = getattr(cfg, "ITEMS_FILE", "dumpids/items.json")
+    structs_path = getattr(cfg, "STRUCTURES_FILE", "dumpids/structures.json")
+    modlist_path = getattr(cfg, "MODLIST_FILE", "dumpids/modlist.json")
+    entities_path = getattr(cfg, "ENTITIES_FILE", "dumpids/entities.json")
+    advancements_path = getattr(cfg, "ADVANCEMENTS_FILE", "dumpids/advancements.json")
+    fluids_path = getattr(cfg, "FLUIDS_FILE", "dumpids/fluids.json")
 
     _load_mcmod_cache()
 
@@ -1291,7 +1327,15 @@ def main():
     structures = load_structures(structs_path)
     entity_ids = list(load_entities(entities_path).keys())
 
-    log(f"[汇总] 物品 {len(item_ids)} | 结构 {len(structures)} | 实体 {len(entity_ids)} | 模组 {len(_modlist_map)}")
+    advancement_ids = []
+    fluid_ids = []
+    if enable_advancement:
+        advancement_ids = load_advancements(advancements_path)
+    if enable_fluid:
+        fluid_ids = load_fluids(fluids_path)
+
+    log(f"[汇总] 物品 {len(item_ids)} | 结构 {len(structures)} | 实体 {len(entity_ids)} "
+        f"| 进度 {len(advancement_ids)} | 流体 {len(fluid_ids)} | 模组 {len(_modlist_map)}")
 
     # ---- 生成整合包介绍章节 ----
     all_quests = []
@@ -1300,6 +1344,7 @@ def main():
     if getattr(cfg, "GENERATE_PACK_INTRO", True):
         log("\n===== 生成整合包介绍章节 =====")
         intro_prompt = build_intro_prompt()
+        batch = []
         for attempt in range(2):
             batch = call_deepseek(intro_prompt)
             if batch:
@@ -1311,6 +1356,8 @@ def main():
                 batch, [], 0,
                 valid_structures=set(structures),
                 valid_entities=set(entity_ids),
+                valid_advancements=set(advancement_ids),
+                valid_fluids=set(fluid_ids),
                 allowed_types=["checkmark"],
             )
             for i, q in enumerate(intro_quests):
@@ -1326,6 +1373,13 @@ def main():
         log(f"\n----- 第 {ci+1}/{len(flat)} 章: {ch['title']} -----")
         ctx = chapter_context(ci)
 
+        # 根据运行时开关过滤章节允许的任务类型
+        chapter_allowed = list(ctx["task_types"])
+        if not enable_advancement and "advancement" in chapter_allowed:
+            chapter_allowed.remove("advancement")
+        if not enable_fluid and "fluid" in chapter_allowed:
+            chapter_allowed.remove("fluid")
+
         n_batches = ch.get("batches", 1)
         chapter_quests = []
 
@@ -1333,7 +1387,9 @@ def main():
             log(f"  [批次 {bi+1}/{n_batches}]")
             prompt = build_prompt(
                 item_ids, structures, entity_ids,
-                ci, bi, chapter_quests
+                ci, bi, chapter_quests,
+                advancement_ids if enable_advancement else None,
+                fluid_ids if enable_fluid else None,
             )
 
             batch = call_deepseek(prompt)
@@ -1345,17 +1401,17 @@ def main():
                 batch, chapter_quests, bi,
                 valid_structures=set(structures),
                 valid_entities=set(entity_ids),
-                allowed_types=ctx["task_types"],
+                valid_advancements=set(advancement_ids),
+                valid_fluids=set(fluid_ids),
+                allowed_types=chapter_allowed,
             )
 
-            # 第一批的第一个任务依赖置空
             if not chapter_quests and cleaned:
                 cleaned[0]["dependencies"] = []
 
             chapter_quests.extend(cleaned)
             log(f"    [完成] 本批次 {len(cleaned)} 个任务，本章累计 {len(chapter_quests)} 个")
 
-        # 本章内循环检测
         if chapter_quests:
             n_fixed = break_cycles(chapter_quests)
             if n_fixed:
@@ -1371,13 +1427,12 @@ def main():
     else:
         log(f"  [全局循环检测] 无循环依赖 ✓")
 
-    # ==================== ▼ 难度奖励生成 ====================
+    # ---- 难度奖励生成 ----
     difficulty_tables = {}
     if getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
         log(f"\n===== 难度奖励生成 =====")
         difficulty_tables = attach_rewards_to_quests(all_quests, item_ids)
 
-        # 日志输出部分任务的奖励信息
         sample_n = min(5, len(all_quests))
         log(f"  [预览] 前 {sample_n} 个任务的奖励:")
         for q in all_quests[:sample_n]:
@@ -1386,20 +1441,17 @@ def main():
                 log(f"    - {q['key']} ({q['type']}, Lv{diff}): {q.get('reward_table_id', 'N/A')[:16]}...")
     else:
         log(f"\n===== 难度奖励已关闭，跳过 =====")
-    # ==================== ▲ 难度奖励生成 ====================
 
     # ---- 构建原有奖励表 ----
     log(f"\n===== 生成奖励表 =====")
     all_reward_tables = {}
 
-    # 合并原有 REWARD_TABLES
     if hasattr(cfg, 'REWARD_TABLES') and cfg.REWARD_TABLES:
         for key, spec in cfg.REWARD_TABLES.items():
             tid, snbt = build_reward_table_snbt(key, item_ids)
             all_reward_tables[tid] = snbt
             log(f"  [奖励表] {key} -> {tid[:16]}...")
 
-    # 合并难度奖励表
     all_reward_tables.update(difficulty_tables)
     log(f"  [总计] 共 {len(all_reward_tables)} 张奖励表")
 
@@ -1407,14 +1459,12 @@ def main():
     output_dir = getattr(cfg, "OUTPUT_DIR", "output")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 写出 reward_tables.snbt
     rt_path = os.path.join(output_dir, "reward_tables.snbt")
     with open(rt_path, "w", encoding="utf-8") as f:
         for tid, snbt in all_reward_tables.items():
             f.write(snbt + "\n\n")
     log(f"  [写出] 奖励表 -> {rt_path}")
 
-    # 写出任务 JSON（带 reward_table_id）
     quests_out = []
     for q in all_quests:
         q_out = {
@@ -1437,7 +1487,6 @@ def main():
         json.dump(quests_out, f, ensure_ascii=False, indent=2)
     log(f"  [写出] 任务 -> {q_path} ({len(quests_out)} 个)")
 
-    # ---- 清理 ----
     _save_mcmod_cache()
     log(f"\n===== 完成 =====")
     log(f"[统计] 总任务 {len(all_quests)} 个 | 奖励表 {len(all_reward_tables)} 张")
