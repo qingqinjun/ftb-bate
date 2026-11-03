@@ -1,260 +1,144 @@
-详细操作步骤（从零到跑通）
+基于你自己做的 IdDumper 模组，我已经把这份教程重写并优化了。现在完全不需要再去下载和安装那 4 个第三方模组了，直接用你写的 iddumper 导出的 JSON 文件即可。
 
-下面按顺序一步步做，每步都有「做什么 / 怎么做 / 怎么确认成功」。
-
----
-
-阶段 A：准备文件（游戏内导出）
-
-A1. 安装 4 个模组
-
-序号 模组 作用 导出文件
-1 Modlist 导出模组列表 modlist.txt
-2 Entity Dump 导出实体列表 entities_list.json
-3 Tell Me My Items (TMMI) 导出物品列表 items.json
-4 Structure Dump 导出结构列表 structure_dump.txt
-
-怎么做：
-
-1. 下载这 4 个模组的 .jar 文件（注意版本要匹配你的 Minecraft / 整合包版本）。
-2. 把 .jar 全部放进 .minecraft/mods/ 文件夹。
-3. 启动游戏，进入任意存档。
-
-确认成功： 游戏能正常启动，模组列表里能看到这 4 个模组。
+因为你的脚本现在已经支持直接读取 JSON，所以教程变得非常简洁。以下是专为你现在这套流程定制的全新操作指南：
 
 ---
 
-A2. 执行导出指令
+FTB Quests 任务书自动生成器（IdDumper 专属版）从零跑通教程
 
-进游戏后，在聊天框输入：
+这套教程分为三个阶段：准备数据（你的模组） → 配置环境（Termux） → 修改代码并运行。
+
+阶段 A：使用 IdDumper 导出数据
+
+A1. 准备游戏环境
+
+1. 确保你的 Minecraft 是 1.20.1 版本。
+2. 如果你玩的是 Fabric 端，请安装 Fabric API 以及你做的 iddumper-1.0.0.jar。
+3. 如果你玩的是 Forge 端，直接把 iddumper-1.0.0.jar 放进 mods 文件夹。
+
+A2. 游戏内执行指令
+进入任意一个存档（确保开启了作弊/你是OP），在聊天框输入：
 
 ```mcfunction
-/tmmiexport        # 导出物品 → items.json
-/dumpstructures    # 导出结构 → structure_dump.txt
+/dumpids
 ```
 
-另外两个模组（Modlist、Entity Dump）通常是进游戏自动导出，或在模组配置界面里有导出按钮。
+执行后，聊天框会提示：§aID 导出完成: <路径>。
 
-导出后去哪里找文件？ 按以下顺序翻：
+A3. 转移文件到工作目录
+去你的存档目录下（通常是 saves/你的存档名/dumpids/），找到这 6 个文件：
 
-1. .minecraft/config/ —— 最常见
-2. .minecraft/ 根目录
-3. 模组自己的配置文件夹（如 .minecraft/config/模组名/）
-4. 如果还找不到，看游戏日志（.minecraft/logs/latest.log），搜模组名，日志里通常会打印导出路径
+· items.json（物品）
+· entities.json（实体）
+· structures.json（结构）
+· modlist.json（模组列表）
+· advancements.json（进度/成就，可选）
+· fluids.json（流体，可选）
 
-确认成功： 4 个文件都能找到：
+在手机存储里新建一个文件夹 py，把这 6 个文件全部移动过去：
 
-· modlist.txt
-· entities_list.json
-· items.json
-· structure_dump.txt
-
----
-
-A3. 把 5 个文件放同一文件夹
-
-在手机存储里建一个文件夹，比如：
-
-```
+```text
 /storage/emulated/0/Download/py/
-├── ftb-bate.py          ← 你的脚本
-├── modlist.txt
+├── ftb-bate.py          ← 你的 Python 主程序
+├── config.py            ← 你的配置文件
 ├── items.json
-├── structure_dump.txt
-└── entities_list.json
+├── entities.json
+├── structures.json
+├── modlist.json
+└── (以及可选的两个 json)
 ```
-
-怎么做：
-
-1. 用文件管理器（或 Termux 的 cp 命令）把上面 4 个导出文件复制到这个文件夹。
-2. 把你的 ftb-bate.py 也放进去。
-
-⚠️ 关键检查： 打开 ftb-bate.py，确认开头附近这一行：
-
-```python
-BASE_DIR = "/storage/emulated/0/Download/py"
-```
-
-必须和你实际放文件的路径完全一致。不一致就改成实际路径。
-
-确认成功： 在 Termux 里执行 ls /storage/emulated/0/Download/py，能看到 5 个文件。
 
 ---
 
 阶段 B：准备环境（Termux）
 
-B1. 安装 Python + 存储权限
+B1. 安装 Python 与依赖
 
 ```bash
 pkg update -y
 pkg install -y python
-termux-setup-storage
-```
-
-注意： termux-setup-storage 执行后会弹窗问是否允许访问存储，必须点「允许」。
-
-确认成功：
-
-```bash
-python --version          # 显示 Python 3.x.x
-ls /storage/emulated/0/   # 能看到 Download 等文件夹
-```
-
----
-
-B2. 安装依赖
-
-```bash
+termux-setup-storage # 弹窗记得点允许
 pip install requests
 ```
 
-确认成功：
+B2. 设置 API Key
 
 ```bash
-python -c "import requests; print(requests.__version__)"
+export DEEPSEEK_API_KEY="你的API_KEY"
+echo $DEEPSEEK_API_KEY  # 确认能打印出你的 key
 ```
 
-能打印出版本号即成功。
+(注意：每次新开 Termux 窗口都需要重新 export)
 
----
-
-B3. 设置 API Key 并验证
-
-```bash
-export DEEPSEEK_API_KEY="你的新key"
-echo $DEEPSEEK_API_KEY
-```
-
-确认成功： echo 能打印出你的 key（不是空行）。
-
-⚠️ 重要提醒： export 只在当前 Termux 窗口有效。关掉窗口/新开窗口后要重新 export。建议每次开新窗口先跑一次 echo $DEEPSEEK_API_KEY 检查。
-
----
-
-B4. 测网络 + 测 API（关键，别跳过）
-
-第一步：测网络
+B3. 测试网络连通性
 
 ```bash
 curl -I --max-time 10 https://api.deepseek.com
 ```
 
-第二步：测 API
+如果返回 200 或 400，说明网络没问题。
 
-```bash
-curl https://api.deepseek.com/chat/completions \
-  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
-  --max-time 30
-```
-
-结果对照表：
-
-返回 含义 处理
-带 content 的 JSON ✅ 全通 进入阶段 C
-401 Key 无效 回 B3 重设 key
-400/404 提到 model 模型名不对 按报错里提示的可用模型名改脚本 MODEL = "..."
-超时 网络问题 换网络 / 开代理
-
----
-
-B5. 防休眠
+B4. 防休眠
 
 ```bash
 termux-wake-lock
 ```
 
-防止跑长任务时手机休眠导致中断。
-
 ---
 
-阶段 C：合流运行
+阶段 C：修改代码与运行
 
-C1. 进入目录
+C1. 修改 config.py（非常关键）
+用文本编辑器打开 config.py，找到路径部分。保证路径与你存放 json 文件的路径完全一致：
+
+```python
+BASE_DIR = "/storage/emulated/0/Download/py/dumpids"
+# 如果你的文件直接放在了 py 根目录，就改成 "/storage/emulated/0/Download/py"
+```
+
+确保下面的几行能正确指向文件名（如果文件直接在 py 目录，去掉 dumpids/）：
+
+```python
+MODLIST_FILE      = os.path.join(BASE_DIR, "modlist.json")
+ITEMS_FILE        = os.path.join(BASE_DIR, "items.json")
+STRUCTURES_FILE   = os.path.join(BASE_DIR, "structures.json")
+ENTITIES_FILE     = os.path.join(BASE_DIR, "entities.json")
+ADVANCEMENTS_FILE = os.path.join(BASE_DIR, "advancements.json")
+FLUIDS_FILE       = os.path.join(BASE_DIR, "fluids.json")
+```
+
+C2. 填写章节信息
+还是在 config.py 里，找到 CHAPTER_GROUPS。按你的整合包实际内容，填写章节的标题、要求等。如果不需要特定模组限制，item_prefixes 留空列表 [] 即可。
+
+C3. 运行脚本
 
 ```bash
 cd /storage/emulated/0/Download/py
-ls
-```
-
-确认成功： ls 能看到 5 个文件（脚本 + 4 个导出文件）。
-
----
-
-C2. 先跑 1 章测试
-
-临时改脚本： 打开 ftb-bate.py，把
-
-```python
-TOTAL_CHAPTERS = 10
-```
-
-改成
-
-```python
-TOTAL_CHAPTERS = 1
-```
-
-运行：
-
-```bash
 python ftb-bate.py
 ```
 
-等待 1~2 分钟。
+C4. 交互询问
+程序启动后，会问你两个问题：
 
-确认成功： 目录里出现：
+1. 是否允许生成【成就/进度】类型任务？ [y/N]: 
+   (如果你导出了 advancements.json，且你的 FTB Quests 支持成就任务，输入 y)
+2. 是否允许生成【流体】类型任务？ [y/N]: 
+   (输入 y 或 n)
 
-· chapter_01.snbt
-· data.snbt
-
-如果报错，看报错信息对照 B4 的结果表排查。
-
----
-
-C3. 改回完整章数，正式跑
-
-把脚本改回：
-
-```python
-TOTAL_CHAPTERS = 10   # 你的暮色版是 10
-```
-
-再跑一遍：
-
-```bash
-python ftb-bate.py
-```
-
-建议： 先跑 termux-wake-lock，手机插电，别切后台，等它跑完。
+等待 AI 跑完，你会在 py 目录下看到生成的 output 文件夹，里面有 quests.json 和 reward_tables.snbt。
 
 ---
 
-附：最容易卡住的 3 个点
+⚠️ 最容易卡住的 3 个点
 
-问题 原因 解决
-文件找不到 4 个模组导出路径不统一 翻 .minecraft/config/、.minecraft/ 根目录、模组自己的配置文件夹；或看 logs/latest.log 里模组打印的路径
-echo $DEEPSEEK_API_KEY 为空 export 只在当前窗口有效，关窗就没了 每次新开 Termux 窗口都要重新 export
-API 返回 404 model 错误 deepseek-flash 模型名不对 看报错里提示的可用模型名，改脚本里的 MODEL = "..."
+1. 找不到 JSON 文件
+   · 原因：config.py 里的 BASE_DIR 路径写错了，或者文件没放进去。
+   · 解决：在 Termux 里运行 ls /storage/emulated/0/Download/py，亲眼确认那几个 .json 文件就在那里。
+2. API 调用报 401 错误
+   · 原因：Key 没有设置，或者 export 的窗口失效了。
+   · 解决：重新 export DEEPSEEK_API_KEY="..."。
+3. 导入游戏提示“未知任务类型”
+   · 原因：FTB Quests 原版可能不支持 advancement 或 fluid 类型的任务。
+   · 解决：在 config.py 的 CHAPTER_GROUPS 里，把 task_types 里面的 "advancement" 或 "fluid" 删掉，只保留 ["item", "checkmark", "structure", "kill"]。运行脚本时对应问题也选 n。
 
----
-
-你贴的 9 步 ↔ 上面的对应关系
-
-原 9 步 对应上面
-第 1 步 确认 Termux 环境 B1
-第 2 步 安装依赖 B2
-第 3 步 检查脚本 API_KEY 行 A3
-第 4 步 确认文件在位 A3 + C1
-第 5 步 设置 Key 并验证 B3
-第 6 步 测网络 B4（第一段 curl）
-第 7 步 手动测 API B4（第二段 curl）
-第 8 步 防休眠 B5
-第 9 步 先跑一章测试 C2 → C3
-
----
-
-按顺序做：A（准备文件）→ B（环境）→ C（跑），每个「确认成功」都过了再进下一步，基本不会卡。
-
-实在不会的话可以把这些喂给AI，让其生成专属教程，支持中英文切换，改之前还得配置config.py文件，直接喂AI即可，目前那四个模组适配于1.20.1forge版本，其它版本可能有，没有的话就得安装其它模组进行导出ID，我做了个可以导出物品、实体与结构ID的模组，适配于1.20.1fabric版本。改配置文件以及主体直接喂给AI就行，让其把路径改了，以及输入你的要求就好了，先改主体，再是配置文件。我做的模组指令为/dumpids。
+(如果你不想手动改，可以把主体和配置文件、以及这个教程全喂给 AI，让 AI 根据你的实际游戏路径和想法全自动改好。)
