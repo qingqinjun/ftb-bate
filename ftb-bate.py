@@ -7,12 +7,14 @@ ftb-bate —— FTB Quests 任务书自动生成器
   - 章节组 / 章节 / 任务三层结构
   - item / checkmark / structure / kill 四种任务类型
   - 真实 reward_tables 生成，random 奖励引用真实表
+  - 奖励物品优先从 items.json 动态构建
   - 依赖循环检测与修复
-  - 章节 icon 字段
+  - 章节 icon 自动校验，不在 items.json 时回退 ICON_FALLBACK
+  - 整合包介绍章节自动生成（置于所有章节组之前）
   - 日志持久化
-  - 数据文件递归解包：支持任意嵌套
-  - 任务语言切换（中文 / 英文），由 config.QUEST_LANGUAGE 控制
-  - ▼ MC 百科补充：按 config.MCMOD_* 开关查询，带本地缓存
+  - 数据文件递归解包
+  - 任务语言切换（zh / en）
+  - MC 百科：模组级攻略补充，优先读 modlist.txt 的模组中文名
 ========================================================
 """
 import json
@@ -50,6 +52,9 @@ def log(msg):
 
 def init_log(path):
     global _LOG_FILE
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     _LOG_FILE = open(path, "a", encoding="utf-8")
 
 
@@ -60,9 +65,10 @@ def close_log():
         _LOG_FILE = None
 
 
-# ==================== ▼ MC百科：缓存与查询 ====================
+# ==================== ▼ MC百科：模组级攻略补充 ====================
 _mcmod_cache = {}
 _mcmod_cache_dirty = False
+_modlist_map = {}   # modid -> 模组名
 
 
 def _load_mcmod_cache():
@@ -99,7 +105,6 @@ def _save_mcmod_cache():
 
 
 def _extract_summary_from_html(html, keyword):
-    """从 MC 百科搜索页 HTML 中粗抽标题/简介，失败返回空串。"""
     title = ""
     m = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
     if m:
@@ -127,13 +132,24 @@ def _extract_summary_from_html(html, keyword):
     return "；".join(parts)
 
 
+def _cn_keyword(keyword):
+    """modid:item -> 模组中文名 item；用于 MC 百科模组级搜索。"""
+    if ":" not in keyword:
+        return keyword
+    prefix, rest = keyword.split(":", 1)
+
+    name = _modlist_map.get(prefix)
+    if name:
+        return f"{name} {rest}"
+
+    cn = getattr(cfg, "MCMOD_KEYWORD_MAP", {}).get(prefix)
+    if cn:
+        return f"{cn} {rest}"
+
+    return keyword
+
+
 def lookup_mcmod(keyword, timeout=None):
-    """
-    查询 MC 百科，返回补充文本；失败返回空字符串。
-    - 若 cfg.MCMOD_API_BASE 返回 JSON，按 JSON 解析 title/summary
-    - 若返回 HTML，用正则抽 title/description
-    - 结果写入 _mcmod_cache，标脏，run 结束时统一落盘
-    """
     global _mcmod_cache_dirty
     if not keyword:
         return ""
@@ -150,10 +166,11 @@ def lookup_mcmod(keyword, timeout=None):
     if timeout is None:
         timeout = getattr(cfg, "MCMOD_TIMEOUT", 10)
 
+    query = _cn_keyword(keyword)
     try:
         resp = requests.get(
             base,
-            params={"q": keyword, "key": keyword, "search": keyword},
+            params={"q": query, "key": query, "search": query},
             timeout=timeout,
             headers={"User-Agent": "ftb-bate/1.0"},
         )
@@ -167,21 +184,13 @@ def lookup_mcmod(keyword, timeout=None):
                 title = summary = ""
                 if isinstance(data, dict):
                     title = data.get("title") or data.get("name") or ""
-                    summary = (
-                        data.get("summary")
-                        or data.get("desc")
-                        or data.get("description")
-                        or ""
-                    )
+                    summary = (data.get("summary") or data.get("desc")
+                               or data.get("description") or "")
                     if not (title or summary) and isinstance(data.get("data"), dict):
                         d = data["data"]
                         title = d.get("title") or d.get("name") or ""
-                        summary = (
-                            d.get("summary")
-                            or d.get("desc")
-                            or d.get("description")
-                            or ""
-                        )
+                        summary = (d.get("summary") or d.get("desc")
+                                   or d.get("description") or "")
                 parts = []
                 if title:
                     parts.append(f"标题: {title}")
@@ -193,7 +202,7 @@ def lookup_mcmod(keyword, timeout=None):
                 text = ""
 
         if not text:
-            text = _extract_summary_from_html(resp.text, keyword)
+            text = _extract_summary_from_html(resp.text, query)
 
         _mcmod_cache[keyword] = text
         _mcmod_cache_dirty = True
@@ -206,40 +215,37 @@ def lookup_mcmod(keyword, timeout=None):
 
 
 def _build_mcmod_section(item_pool, entity_pool):
-    """拼出【MC百科补充资料】段落；无结果返回空串。"""
+    """只对模组级查询：把一批 ID 按 modid 去重，每个 modid 查一次。"""
     if not getattr(cfg, "ENABLE_MCMOD_LOOKUP", False):
         return ""
     max_n = int(getattr(cfg, "MCMOD_MAX_LOOKUP", 0) or 0)
     if max_n <= 0:
         return ""
 
-    candidates = []
-    for iid in item_pool:
-        if iid not in candidates:
-            candidates.append(iid)
-        if len(candidates) >= max_n:
+    seen_modids = []
+    for iid in list(item_pool) + list(entity_pool):
+        if ":" not in iid:
+            continue
+        modid = iid.split(":", 1)[0]
+        if modid not in seen_modids:
+            seen_modids.append(modid)
+        if len(seen_modids) >= max_n:
             break
-    if len(candidates) < max_n:
-        for eid in entity_pool:
-            if eid not in candidates:
-                candidates.append(eid)
-            if len(candidates) >= max_n:
-                break
 
-    if not candidates:
+    if not seen_modids:
         return ""
 
-    log(f"  [MC百科] 本批查询 {len(candidates)} 个 ID ...")
+    log(f"  [MC百科] 本批查询 {len(seen_modids)} 个模组 ...")
     lines = []
-    for kw in candidates:
-        hint = lookup_mcmod(kw)
+    for modid in seen_modids:
+        hint = lookup_mcmod(f"{modid}:main")
         if hint:
-            lines.append(f"- {kw}: {hint}")
+            lines.append(f"- {modid}: {hint}")
 
     if not lines:
         return ""
     return (
-        "\n【MC百科补充资料】（仅供参考，据此让标题/描述更贴切，不要编造 ID）\n"
+        "\n【MC百科补充资料】（模组级攻略，仅供参考，不要编造 ID）\n"
         + "\n".join(lines)
         + "\n"
     )
@@ -252,8 +258,6 @@ def gen_hex_id():
 
 
 class IdPool:
-    """全局唯一 ID 池，防止碰撞。"""
-
     def __init__(self):
         self.used = set()
 
@@ -290,7 +294,6 @@ def _clean_str(s):
 
 
 def _find_data_array(data, known_keys, depth=0):
-    """递归从任意嵌套结构中找出目标数组。"""
     if depth > 6:
         return None, ""
     if isinstance(data, list):
@@ -355,9 +358,29 @@ def _parse_structures(filepath):
 
 
 def _parse_modlist(filepath):
+    """解析 modlist.txt，返回 dict: modid -> 模组名。"""
+    modid_to_name = {}
+    pat = re.compile(
+        r'^\s*(?P<name>.+?)\s{2,}(?P<modid>[a-z_0-9]+)\s{2,}(?P<ver>[^\s<]+)?'
+    )
     with open(filepath, "r", encoding="utf-8") as f:
-        content = f.read()
-    return set(re.findall(r'[a-z_0-9]+:[a-z_0-9]+', content.lower()))
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            stripped = line.lstrip()
+            if stripped.startswith("Название") or stripped.startswith("---"):
+                continue
+            m = pat.match(line)
+            if not m:
+                continue
+            name = m.group("name").strip()
+            modid = m.group("modid").strip()
+            if not modid or ":" in modid:
+                continue
+            if name and modid and modid not in modid_to_name:
+                modid_to_name[modid] = name
+    return modid_to_name
 
 
 def _parse_entities(filepath):
@@ -367,8 +390,7 @@ def _parse_entities(filepath):
         data, ("entities", "entity", "data", "list", "items", "result", "values")
     )
     if arr is None:
-        log(f"  [警告] 无法从 entities_list.json 中找到实体数组"
-            f"（顶层类型: {type(data).__name__}）")
+        log(f"  [警告] 无法从 entities_list.json 中找到实体数组")
         return {}
     result = {}
     if isinstance(arr, list):
@@ -421,8 +443,8 @@ def load_structures(filepath):
 def load_modlist(filepath):
     data = load_file_with_retry(filepath, _parse_modlist, "modlist.txt")
     if data is None:
-        return set()
-    log(f"[加载] modlist.txt: 提取到 {len(data)} 个潜在 ID")
+        return {}
+    log(f"[加载] modlist.txt: {len(data)} 个模组名映射")
     return data
 
 
@@ -431,11 +453,6 @@ def load_entities(filepath):
     if data is None:
         return {}
     log(f"[加载] entities_list.json: {len(data)} 个实体")
-    if data:
-        log(f"[诊断] 实体样本: {list(data.keys())[:5]}")
-        for prefix in ("twilightforest", "legendary_monsters"):
-            hit = sum(1 for k in data if k.startswith(prefix + ":"))
-            log(f"[诊断] {prefix}: {hit} 条")
     return data
 
 
@@ -444,6 +461,19 @@ def filter_by_prefix(ids, prefixes):
     for p in prefixes:
         out.extend([i for i in ids if i.startswith(p + ":")])
     return out
+
+
+# ==================== 图标校验 ====================
+def resolve_icon(icon, valid_items):
+    """章节 icon 校验：为空或不在 items.json 时回退 ICON_FALLBACK。"""
+    icon = _clean_str(icon)
+    fallback = getattr(cfg, "ICON_FALLBACK", "minecraft:book")
+    if not icon:
+        return ""
+    if valid_items and icon not in valid_items:
+        log(f"    [图标] {icon} 不在 items.json，回退为 {fallback}")
+        return fallback
+    return icon
 
 
 # ==================== 章节上下文 ====================
@@ -457,6 +487,7 @@ def chapter_context(chapter_index):
         "item_prefixes": ch.get("item_prefixes", []),
         "entity_prefixes": ch.get("entity_prefixes", []),
         "use_structures": ch.get("use_structures", False),
+        "task_types": ch.get("task_types", ["item", "checkmark"]),
         "icon": ch.get("icon", ""),
         "group_index": ch["_group_index"],
     }
@@ -464,7 +495,7 @@ def chapter_context(chapter_index):
 
 # ==================== 提示词 ====================
 def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
-               entity_pool, mcmod_section=""):
+               entity_pool, allowed, mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
@@ -475,23 +506,20 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         )
     else:
         chain_hint = (
-            "这是后续批次。新任务可以引用已有任务的 key 作为依赖，但不必强制串联——"
-            "允许独立任务、分支任务。dependencies 可以为空数组（表示无前置）。"
+            "这是后续批次。新任务可以引用已有任务的 key 作为依赖，但不必强制串联。"
+            "允许独立任务、分支任务。dependencies 可以为空数组。"
         )
 
-    if ctx["use_structures"]:
-        type_hint = (
-            '本章重点使用 type="structure" 任务：玩家发现该结构时自动完成。'
-            '必须从【可用结构 ID】中选择真实存在的结构 ID 填入 "id"。'
-        )
-    elif ctx["entity_prefixes"]:
-        type_hint = (
-            '本章可用 type: "item" / "checkmark" / "kill"。'
-            'kill 类型必须有真实的 "id"（实体 ID）和 "count"（整数）。'
-            'item 类型必须有真实物品 "id"。'
-        )
-    else:
-        type_hint = 'type 只能是 "item" 或 "checkmark"。item 类型必须有真实存在的 "id"。'
+    type_lines = []
+    if "item" in allowed:
+        type_lines.append('item 类型：需要真实物品 "id"，可选 "count"（整数，默认 1）')
+    if "checkmark" in allowed:
+        type_lines.append('checkmark 类型：仅需 title/desc，用于仪式、对话、阶段标记')
+    if "structure" in allowed:
+        type_lines.append('structure 类型：必须从【可用结构 ID】中选择真实 "id"')
+    if "kill" in allowed:
+        type_lines.append('kill 类型：必须从【可用实体 ID】逐字复制 "id"，并给 "count"')
+    type_hint = "本章允许的任务类型：\n- " + "\n- ".join(type_lines)
 
     return f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
 
@@ -501,7 +529,7 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 【整体要求】{ctx["extra"]}
 【串联要求】{chain_hint}
 
-【已有任务 key 列表】（dependencies 只能从这里选，或选本批前面任务的 key，也可为空）：
+【已有任务 key 列表】（dependencies 只能从这里选，或选本批前面任务的 key）：
 {json.dumps(prev_keys, ensure_ascii=False)}
 
 【已有任务示例】（最近 8 个）：
@@ -510,15 +538,15 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 【可用物品 ID】（必须使用真实 ID，禁止编造）：
 {json.dumps(item_pool[:40], ensure_ascii=False)}
 
-【可用结构 ID】（structure 类型必须使用真实 ID，禁止编造）：
+【可用结构 ID】（structure 类型必须使用真实 ID）：
 {json.dumps(struct_pool, ensure_ascii=False)}
 
-【可用实体 ID】（kill 类型必须从以下列表**逐字复制**，禁止修改、禁止编造）：
+【可用实体 ID】（kill 类型必须逐字复制）：
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
 {mcmod_section}
-【输出格式】严格输出 JSON 数组，不要 Markdown 代码块，不要解释文字：
+【输出格式】严格输出 JSON 数组，不要 Markdown 代码块：
 [
-  {{"key": "t1", "type": "item", "id": "modid:item_name", "title": "中文标题", "desc": "中文描述", "dependencies": []}},
+  {{"key": "t1", "type": "item", "id": "modid:item_name", "count": 5, "title": "中文标题", "desc": "中文描述", "dependencies": []}},
   {{"key": "t2", "type": "checkmark", "title": "中文标题", "desc": "中文描述", "dependencies": ["t1"]}},
   {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "中文标题", "desc": "中文描述", "dependencies": ["t2"]}},
   {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "中文标题", "desc": "中文描述", "dependencies": []}}
@@ -526,43 +554,39 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 
 规则：
 - 每批恰好 {cfg.BATCH_SIZE} 个任务
-- key 在本章内唯一，用 t1/t2/... 这种短名
+- key 在本章内唯一，用 t1/t2/... 短名
 - {type_hint}
-- dependencies 是 key 的数组，可为空数组（表示无前置）
+- dependencies 是 key 数组，可为空
 - title ≤ 12 字，desc ≤ 30 字
 - 绝对不要编造物品、结构或实体 ID
 """
 
 
 def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
-               entity_pool, mcmod_section=""):
+               entity_pool, allowed, mcmod_section=""):
     prev_keys = [q["key"] for q in already]
     prev_desc = [f'{q["key"]}: {q["title"]}' for q in already[-8:]]
 
     if not already:
         chain_hint = (
-            "This is the first batch of this chapter. The first quest's dependencies MUST be an empty array []; "
-            "it acts as the chapter root. Later quests may branch freely or be isolated. Full chaining is not required."
+            "First batch of this chapter. The first quest's dependencies MUST be []; "
+            "later quests may branch freely."
         )
     else:
         chain_hint = (
-            "This is a follow-up batch. New quests may reference existing keys as dependencies, but chaining is not mandatory. "
-            "Independent or branching quests are allowed. dependencies may be an empty array [] (no prerequisite)."
+            "Follow-up batch. New quests may reference existing keys; chaining is optional."
         )
 
-    if ctx["use_structures"]:
-        type_hint = (
-            'This chapter focuses on type="structure" quests: completed automatically when the player finds the structure. '
-            'The "id" MUST be a real structure ID from the provided list.'
-        )
-    elif ctx["entity_prefixes"]:
-        type_hint = (
-            'Allowed types: "item" / "checkmark" / "kill". '
-            'kill quests MUST have a real "id" (entity ID) and an integer "count". '
-            'item quests MUST have a real item "id".'
-        )
-    else:
-        type_hint = 'type must be "item" or "checkmark". item quests MUST have a real "id".'
+    type_lines = []
+    if "item" in allowed:
+        type_lines.append('item quest: real "id" required; optional integer "count"')
+    if "checkmark" in allowed:
+        type_lines.append('checkmark quest: title/desc only')
+    if "structure" in allowed:
+        type_lines.append('structure quest: "id" MUST be a real structure ID')
+    if "kill" in allowed:
+        type_lines.append('kill quest: "id" MUST be copied verbatim; add integer "count"')
+    type_hint = "Allowed quest types:\n- " + "\n- ".join(type_lines)
 
     return f"""You are a Minecraft FTB Quests designer. {cfg.PACK_INTRO}
 
@@ -572,42 +596,50 @@ Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}"
 [Overall requirements] {ctx["extra"]}
 [Chaining rule] {chain_hint}
 
-[Existing quest keys] (dependencies may only reference these or earlier quests in this batch; empty array allowed):
+[Existing quest keys]:
 {json.dumps(prev_keys, ensure_ascii=False)}
 
-[Recent quest examples] (last 8):
+[Recent quest examples]:
 {json.dumps(prev_desc, ensure_ascii=False)}
 
-[Available item IDs] (must be real, do NOT invent):
+[Available item IDs] (must be real):
 {json.dumps(item_pool[:40], ensure_ascii=False)}
 
-[Available structure IDs] (structure quests must use real IDs, do NOT invent):
+[Available structure IDs]:
 {json.dumps(struct_pool, ensure_ascii=False)}
 
-[Available entity IDs] (kill quests MUST copy these verbatim, do NOT modify or invent):
+[Available entity IDs]:
 {json.dumps(entity_pool[:80], ensure_ascii=False)}
 {mcmod_section}
-[Output format] Output ONLY a JSON array, no Markdown code block, no explanation:
+[Output format] Output ONLY a JSON array, no Markdown:
 [
-  {{"key": "t1", "type": "item", "id": "modid:item_name", "title": "English title", "desc": "English description", "dependencies": []}},
+  {{"key": "t1", "type": "item", "id": "modid:item_name", "count": 5, "title": "English title", "desc": "English description", "dependencies": []}},
   {{"key": "t2", "type": "checkmark", "title": "English title", "desc": "English description", "dependencies": ["t1"]}},
   {{"key": "t3", "type": "structure", "id": "modid:structure_name", "title": "English title", "desc": "English description", "dependencies": ["t2"]}},
   {{"key": "t4", "type": "kill", "id": "minecraft:zombie", "count": 10, "title": "English title", "desc": "English description", "dependencies": []}}
 ]
 
 Rules:
-- Exactly {cfg.BATCH_SIZE} quests per batch
-- key unique within this chapter, short names like t1/t2/...
+- Exactly {cfg.BATCH_SIZE} quests
+- key unique within this chapter
 - {type_hint}
-- dependencies is an array of keys; empty array means no prerequisite
+- dependencies is a key array, may be empty
 - title ≤ 5 words, desc ≤ 15 words
 - All title/desc MUST be in English
-- NEVER invent item, structure or entity IDs
+- NEVER invent IDs
 """
 
 
 def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, already):
     ctx = chapter_context(chapter_index)
+
+    allowed = list(ctx["task_types"])
+    if not structures and "structure" in allowed:
+        allowed.remove("structure")
+    if not entity_ids and "kill" in allowed:
+        allowed.remove("kill")
+    if not allowed:
+        allowed = ["item", "checkmark"]
 
     item_pool = filter_by_prefix(item_ids, ctx["item_prefixes"]) if ctx["item_prefixes"] else []
     if not item_pool:
@@ -617,14 +649,60 @@ def build_prompt(item_ids, structures, entity_ids, chapter_index, batch_index, a
     if not entity_pool and ctx["entity_prefixes"]:
         entity_pool = entity_ids[:30]
 
-    # ▼ MC百科：查前 N 个 ID，拼【MC百科补充资料】
     mcmod_section = _build_mcmod_section(item_pool, entity_pool)
 
     if is_en():
         return _prompt_en(ctx, chapter_index, batch_index, already,
-                          item_pool, struct_pool, entity_pool, mcmod_section)
+                          item_pool, struct_pool, entity_pool, allowed, mcmod_section)
     return _prompt_zh(ctx, chapter_index, batch_index, already,
-                      item_pool, struct_pool, entity_pool, mcmod_section)
+                      item_pool, struct_pool, entity_pool, allowed, mcmod_section)
+
+
+# ==================== 整合包介绍章节提示词 ====================
+def build_intro_prompt():
+    mods = sorted(set(_modlist_map.values()))
+    mod_lines = "\n".join(f"- {m}" for m in mods[:40]) if mods else "（无 modlist）"
+    n = int(getattr(cfg, "PACK_INTRO_TASK_COUNT", 3))
+
+    if is_en():
+        return f"""You are a Minecraft FTB Quests designer. {cfg.PACK_INTRO}
+
+Generate an INTRODUCTORY chapter with exactly {n} checkmark quests that teach the player what this modpack is about.
+All quests MUST be type "checkmark" (title/desc only, no id).
+All titles/descs MUST be in English.
+
+[Mods in this pack]
+{mod_lines}
+
+[Output format] Output ONLY a JSON array:
+[
+  {{"key": "t1", "type": "checkmark", "title": "Welcome", "desc": "Overview of the pack", "dependencies": []}},
+  {{"key": "t2", "type": "checkmark", "title": "Core Mods", "desc": "Main gameplay mods", "dependencies": ["t1"]}}
+]
+
+Rules:
+- Exactly {n} quests
+- title ≤ 5 words, desc ≤ 15 words
+"""
+
+    return f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
+
+生成一个【整合包介绍】章节，恰好 {n} 个 checkmark 任务，向玩家介绍本整合包。
+全部任务必须是 type="checkmark"（只有 title/desc，不要 id）。
+
+【本整合包的模组列表】
+{mod_lines}
+
+【输出格式】严格输出 JSON 数组：
+[
+  {{"key": "t1", "type": "checkmark", "title": "欢迎", "desc": "整合包总览", "dependencies": []}},
+  {{"key": "t2", "type": "checkmark", "title": "核心模组", "desc": "主要玩法模组", "dependencies": ["t1"]}}
+]
+
+规则：
+- 恰好 {n} 个任务
+- title ≤ 12 字，desc ≤ 30 字
+"""
 
 
 # ==================== API 调用 ====================
@@ -637,7 +715,7 @@ def call_deepseek(prompt, max_retries=3):
     payload = {
         "model": cfg.MODEL,
         "messages": [
-            {"role": "system", "content": "You output only a JSON array, no explanation, no Markdown code block."
+            {"role": "system", "content": "You output only a JSON array, no explanation, no Markdown."
                                           if is_en() else
                                           "你只输出 JSON 数组，不输出任何解释，不使用 Markdown 代码块。"},
             {"role": "user", "content": prompt},
@@ -674,9 +752,13 @@ def call_deepseek(prompt, max_retries=3):
 
 
 # ==================== 结果清洗 ====================
-def normalize_batch(batch, already, batch_index, valid_structures=None, valid_entities=None):
+def normalize_batch(batch, already, batch_index,
+                    valid_structures=None, valid_entities=None,
+                    allowed_types=None):
     valid_structures = set(valid_structures or [])
-    valid_entities = set(valid_entities or [])
+    valid_entities   = set(valid_entities or [])
+    allowed_types    = set(allowed_types or ["item", "checkmark"])
+
     cleaned = []
     existing_keys = {q["key"] for q in already}
 
@@ -691,14 +773,19 @@ def normalize_batch(batch, already, batch_index, valid_structures=None, valid_en
 
         raw_type = q.get("type")
         raw_id = _clean_str(q.get("id", ""))
+        qtype, qid, count = "checkmark", "", None
 
-        if raw_type == "item" and raw_id:
+        if raw_type == "item" and raw_id and "item" in allowed_types:
             qtype, qid = "item", raw_id
-            count = None
-        elif raw_type == "structure" and raw_id and raw_id in valid_structures:
+            try:
+                count = max(1, int(q.get("count", 1)))
+            except (TypeError, ValueError):
+                count = 1
+        elif (raw_type == "structure" and raw_id
+              and raw_id in valid_structures and "structure" in allowed_types):
             qtype, qid = "structure", raw_id
-            count = None
-        elif raw_type == "kill" and raw_id and raw_id in valid_entities:
+        elif (raw_type == "kill" and raw_id
+              and raw_id in valid_entities and "kill" in allowed_types):
             qtype, qid = "kill", raw_id
             try:
                 count = max(1, int(q.get("count", 1)))
@@ -706,7 +793,7 @@ def normalize_batch(batch, already, batch_index, valid_structures=None, valid_en
                 count = 1
         else:
             if raw_type in ("structure", "kill") and raw_id:
-                log(f"    [警告] {raw_type} ID 无效: {raw_id}，降级为 checkmark")
+                log(f"    [警告] {raw_type} ID 无效或未被允许: {raw_id}，降级为 checkmark")
             qtype, qid, count = "checkmark", "", None
 
         cleaned.append({
@@ -769,6 +856,11 @@ def break_cycles(quests):
 # ==================== 奖励 ====================
 _REWARD_TABLE_ID_CACHE = {}
 
+_REWARD_FALLBACK_POOL = [
+    "minecraft:emerald", "minecraft:diamond", "minecraft:gold_ingot",
+    "minecraft:iron_ingot", "minecraft:experience_bottle",
+]
+
 
 def _reward_table_id(key):
     if key not in _REWARD_TABLE_ID_CACHE:
@@ -776,8 +868,68 @@ def _reward_table_id(key):
     return _REWARD_TABLE_ID_CACHE[key]
 
 
-def build_reward_table_snbt(key):
-    spec = cfg.REWARD_TABLES[key]
+def _is_reward_blacklisted(iid):
+    blacklist = getattr(cfg, "REWARD_ITEM_BLACKLIST", [])
+    for p in blacklist:
+        if iid == p or ((":" not in p) and iid.startswith(p + ":")):
+            return True
+    keywords = getattr(cfg, "REWARD_ITEM_BLACKLIST_KEYWORDS", [])
+    low = iid.lower()
+    for kw in keywords:
+        if kw and kw in low:
+            return True
+    return False
+
+
+def _pick_reward_items(pool, n):
+    if not pool:
+        return []
+    candidates = [i for i in pool if not _is_reward_blacklisted(i)]
+    if not candidates:
+        candidates = list(pool)
+    if len(candidates) <= n:
+        return candidates[:]
+    return random.sample(candidates, n)
+
+
+def _pick_random_item_for_quest(item_pool):
+    if item_pool:
+        candidates = [i for i in item_pool if not _is_reward_blacklisted(i)]
+        if candidates:
+            return random.choice(candidates)
+    return random.choice(_REWARD_FALLBACK_POOL)
+
+
+def build_reward_table_snbt(key, item_pool=None):
+    spec = cfg.REWARD_TABLES.get(key)
+
+    if getattr(cfg, "REWARD_AUTO_FROM_ITEMS", False) and item_pool:
+        n = getattr(cfg, "REWARD_TABLE_SIZE", 4)
+        picks = _pick_reward_items(item_pool, n)
+        if picks:
+            entries = []
+            lo, hi = getattr(cfg, "REWARD_ITEM_COUNT_RANGE", (1, 3))
+            for i, iid in enumerate(picks):
+                w = max(1, len(picks) - i)
+                cnt = random.randint(lo, hi)
+                entries.append(
+                    f'{{type:"item",item:"{iid}",count:{cnt},weight:{w}}}'
+                )
+            title = spec["title"] if spec else key.title()
+            table_id = _reward_table_id(key)
+            return table_id, f'''{{
+    id: "{table_id}"
+    title: "{title}"
+    loot_size: 1
+    entries: [
+        {",".join(entries)}
+    ]
+}}'''
+
+    if spec is None:
+        log(f"  [警告] 奖励表 {key} 不存在且无可用物品池，跳过")
+        return _reward_table_id(key), "{}"
+
     entries = []
     for e in spec["entries"]:
         entries.append(
@@ -794,30 +946,24 @@ def build_reward_table_snbt(key):
 }}'''
 
 
-def build_reward_snbt(quest_type, table_id):
+def build_reward_snbt(quest_type, table_id, item_pool=None):
     rewards = []
     if quest_type == "structure":
         xp = random.choice([30, 40, 50, 60])
-        item_chance = 1.0
-        random_chance = 0.6
+        item_chance, random_chance = 1.0, 0.6
     elif quest_type == "kill":
         xp = random.choice([10, 15, 20, 25])
-        item_chance = 0.6
-        random_chance = 0.3
+        item_chance, random_chance = 0.6, 0.3
     else:
         xp = random.choice([5, 10, 15, 20])
-        item_chance = 0.5
-        random_chance = 0.2
+        item_chance, random_chance = 0.5, 0.2
 
     rewards.append(f'{{type:"xp",amount:{xp}}}')
 
     if random.random() < item_chance:
-        pool = [
-            "minecraft:emerald", "minecraft:diamond", "minecraft:gold_ingot",
-            "minecraft:iron_ingot", "minecraft:experience_bottle",
-        ]
-        rid = random.choice(pool)
-        cnt = random.choice([1, 2, 3])
+        rid = _pick_random_item_for_quest(item_pool)
+        lo, hi = getattr(cfg, "REWARD_ITEM_COUNT_RANGE", (1, 3))
+        cnt = random.randint(lo, hi)
         rewards.append(f'{{type:"item",item:"{rid}",count:{cnt}}}')
 
     if random.random() < random_chance and table_id:
@@ -827,7 +973,7 @@ def build_reward_snbt(quest_type, table_id):
 
 
 # ==================== SNBT 生成 ====================
-def build_snbt_quest(quest, key_to_id, x, y, reward_table_id):
+def build_snbt_quest(quest, key_to_id, x, y, reward_table_id, item_pool=None):
     qid = key_to_id[quest["key"]]
     title = quest["title"].replace('"', '\\"')
     desc = quest["desc"].replace('"', '\\"')
@@ -835,7 +981,8 @@ def build_snbt_quest(quest, key_to_id, x, y, reward_table_id):
     dep_str = "[" + ", ".join(f'"{d}"' for d in deps) + "]" if deps else "[]"
 
     if quest["type"] == "item":
-        tasks = f'[{{type:"item",item:"{quest["id"]}"}}]'
+        cnt = quest.get("count") or 1
+        tasks = f'[{{type:"item",item:"{quest["id"]}",count:{cnt}}}]'
     elif quest["type"] == "structure":
         tasks = f'[{{type:"structure",structure:"{quest["id"]}"}}]'
     elif quest["type"] == "kill":
@@ -844,7 +991,7 @@ def build_snbt_quest(quest, key_to_id, x, y, reward_table_id):
     else:
         tasks = '[{type:"checkmark"}]'
 
-    rewards = build_reward_snbt(quest["type"], reward_table_id)
+    rewards = build_reward_snbt(quest["type"], reward_table_id, item_pool)
 
     return f'''        {{
             id: "{qid}"
@@ -858,18 +1005,33 @@ def build_snbt_quest(quest, key_to_id, x, y, reward_table_id):
         }}'''
 
 
-def generate_chapter_snbt(chapter_index, quests, group_id):
-    ctx = chapter_context(chapter_index)
+def generate_chapter_snbt(chapter_index, quests, group_id, item_ids,
+                          icon_override=None, title_override=None, filename_override=None):
+    ctx = chapter_context(chapter_index) if chapter_index is not None else {}
     chapter_id = ID_POOL.new()
-    filename = f"chapter_{chapter_index + 1:02d}"
-    title = ctx["title"]
+
+    if filename_override:
+        filename = filename_override
+    elif chapter_index is not None:
+        filename = f"chapter_{chapter_index + 1:02d}"
+    else:
+        filename = "chapter_intro"
+
+    title = title_override or ctx.get("title", "章节")
 
     key_to_id = {q["key"]: ID_POOL.new() for q in quests}
 
-    if ctx["use_structures"]:
+    chapter_pool = (filter_by_prefix(item_ids, ctx.get("item_prefixes", []))
+                    if ctx.get("item_prefixes") else item_ids[:])
+    if not chapter_pool:
+        chapter_pool = item_ids[:]
+
+    if ctx.get("use_structures"):
         rtable_key = "structure"
-    elif chapter_index >= cfg.TOTAL_CHAPTERS - 1:
+    elif chapter_index is not None and chapter_index >= cfg.TOTAL_CHAPTERS - 1:
         rtable_key = "endgame"
+    elif chapter_index is not None and chapter_index < 4:
+        rtable_key = "cultivation"
     else:
         rtable_key = "basic"
     reward_table_id = _reward_table_id(rtable_key)
@@ -880,15 +1042,18 @@ def generate_chapter_snbt(chapter_index, quests, group_id):
         row = idx // cfg.COLS_PER_ROW
         x = cfg.START_X + col * cfg.COL_SPACING
         y = cfg.START_Y - row * cfg.ROW_SPACING
-        parts.append(build_snbt_quest(q, key_to_id, x, y, reward_table_id))
+        parts.append(build_snbt_quest(q, key_to_id, x, y,
+                                      reward_table_id, chapter_pool))
 
-    icon_line = f'    icon: "{ctx["icon"]}"\n' if ctx["icon"] else ""
+    icon = icon_override if icon_override is not None else ctx.get("icon", "")
+    icon = resolve_icon(icon, set(item_ids)) if icon else ""
+    icon_line = f'    icon: "{icon}"\n' if icon else ""
 
     content = f'''{{
     filename: "{filename}"
     id: "{chapter_id}"
     group: "{group_id}"
-    order_index: {chapter_index}
+    order_index: 0
     title: "{title}"
 {icon_line}    quests: [
 {",".join(parts)}
@@ -927,14 +1092,59 @@ def generate_data_snbt():
     log(f"[输出] data.snbt 已生成: {path}")
 
 
-def generate_reward_tables():
+def generate_reward_tables(item_ids):
     os.makedirs(cfg.REWARDS_OUTPUT_DIR, exist_ok=True)
+    pools_map = getattr(cfg, "REWARD_TABLE_POOLS", {})
     for key in cfg.REWARD_TABLES:
-        table_id, content = build_reward_table_snbt(key)
+        prefixes = pools_map.get(key, [])
+        pool = filter_by_prefix(item_ids, prefixes) if prefixes else item_ids[:]
+        if not pool:
+            log(f"  [提示] 奖励表 {key} 无对应物品池，将使用后备池")
+            pool = item_ids[:]
+
+        table_id, content = build_reward_table_snbt(key, pool)
         path = os.path.join(cfg.REWARDS_OUTPUT_DIR, f"{key}.snbt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-        log(f"[输出] reward_tables/{key}.snbt -> id={table_id}")
+        log(f"[输出] reward_tables/{key}.snbt -> id={table_id}（候选 {len(pool)} 个）")
+
+
+# ==================== 整合包介绍章节 ====================
+def generate_intro_chapter(group_id, item_ids):
+    if not getattr(cfg, "ENABLE_PACK_INTRO_CHAPTER", False):
+        return None
+
+    title = getattr(cfg, "PACK_INTRO_CHAPTER_TITLE", "整合包介绍")
+    icon = getattr(cfg, "PACK_INTRO_CHAPTER_ICON", "minecraft:book")
+
+    log(f"\n[介绍章节] 生成「{title}」...")
+    prompt = build_intro_prompt()
+    batch = call_deepseek(prompt)
+    if not batch:
+        log(f"  [警告] 介绍章节 AI 无返回，跳过")
+        return None
+
+    allowed = ["checkmark"]
+    cleaned = normalize_batch(batch, [], 0, [], [], allowed)
+    if not cleaned:
+        log(f"  [警告] 介绍章节无有效任务，跳过")
+        return None
+
+    n_cycles = break_cycles(cleaned)
+    if n_cycles:
+        log(f"  [修复] 断开 {n_cycles} 条循环依赖")
+
+    filename, content = generate_chapter_snbt(
+        None, cleaned, group_id, item_ids,
+        icon_override=icon,
+        title_override=title,
+        filename_override="chapter_00",
+    )
+    path = os.path.join(cfg.CHAPTERS_OUTPUT_DIR, f"{filename}.snbt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    log(f"  -> 已输出: {path}（{len(cleaned)} 个任务）")
+    return filename
 
 
 # ==================== 章节生成 ====================
@@ -942,16 +1152,29 @@ def generate_chapter(item_ids, structures, entity_ids, chapter_index):
     all_quests = []
     batches = (cfg.TASKS_PER_CHAPTER + cfg.BATCH_SIZE - 1) // cfg.BATCH_SIZE
     valid_structures = set(structures)
-    valid_entities = set(entity_ids)
+    valid_entities   = set(entity_ids)
+
+    allowed_types = list(chapter_context(chapter_index)["task_types"])
+    if not structures and "structure" in allowed_types:
+        allowed_types.remove("structure")
+    if not entity_ids and "kill" in allowed_types:
+        allowed_types.remove("kill")
+    if not allowed_types:
+        allowed_types = ["item", "checkmark"]
 
     for b in range(batches):
         log(f"    批次 {b+1}/{batches} ...")
-        prompt = build_prompt(item_ids, structures, entity_ids, chapter_index, b, all_quests)
+        prompt = build_prompt(item_ids, structures, entity_ids,
+                              chapter_index, b, all_quests)
         batch = call_deepseek(prompt)
         if not batch:
             log(f"    [警告] 批次 {b+1} 无结果，跳过")
             continue
-        cleaned = normalize_batch(batch, all_quests, b, valid_structures, valid_entities)
+        cleaned = normalize_batch(
+            batch, all_quests, b,
+            valid_structures, valid_entities,
+            allowed_types,
+        )
         all_quests.extend(cleaned)
         log(f"    本批 {len(cleaned)} 个，累计 {len(all_quests)} 个")
 
@@ -964,12 +1187,17 @@ def generate_chapter(item_ids, structures, entity_ids, chapter_index):
 
 # ==================== 主流程 ====================
 def main():
-    init_log(os.path.join(cfg.OUTPUT_DIR, "generate.log") if os.path.isdir(cfg.OUTPUT_DIR) else "generate.log")
+    global _modlist_map
+
+    init_log(os.path.join(cfg.OUTPUT_DIR, "generate.log"))
     try:
         log("=" * 60)
         log(" ftb-bate · FTB Quests 任务书自动生成器")
         log(f" 语言: {'English' if is_en() else '中文'}")
+        log(f" 输出目录: {cfg.OUTPUT_DIR}")
         log(f" MC百科: {'开启' if getattr(cfg, 'ENABLE_MCMOD_LOOKUP', False) else '关闭'}")
+        log(f" 奖励: {'动态构建' if getattr(cfg, 'REWARD_AUTO_FROM_ITEMS', False) else '手写表'}")
+        log(f" 介绍章节: {'开启' if getattr(cfg, 'ENABLE_PACK_INTRO_CHAPTER', False) else '关闭'}")
         log("=" * 60)
 
         if not cfg.API_KEY:
@@ -979,23 +1207,18 @@ def main():
             log("[错误] CHAPTER_GROUPS 中没有章节")
             sys.exit(1)
 
-        # ▼ MC百科：启动时载入缓存
         _load_mcmod_cache()
 
         log("\n[步骤 1/6] 加载数据文件...")
-        items = load_items(cfg.ITEMS_FILE)
-        item_ids = list(items.keys())
+        items      = load_items(cfg.ITEMS_FILE)
+        item_ids   = list(items.keys())
         structures = load_structures(cfg.STRUCTURE_FILE)
-        load_modlist(cfg.MODLIST_FILE)
-        entities = load_entities(cfg.ENTITIES_FILE)
+        _modlist_map = load_modlist(cfg.MODLIST_FILE)
+        entities   = load_entities(cfg.ENTITIES_FILE)
         entity_ids = list(entities.keys())
 
         if not item_ids:
             log("[警告] items.json 为空")
-        if not structures:
-            log("[警告] structure_dump.txt 为空，structure 任务将降级")
-        if not entity_ids:
-            log("[警告] entities_list.json 为空，kill 任务将降级")
 
         log("\n[步骤 2/6] 准备输出目录...")
         os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
@@ -1004,9 +1227,11 @@ def main():
 
         log("\n[步骤 3/6] 生成章节组...")
         group_ids = generate_chapter_groups()
+        intro_group_id = group_ids[0] if group_ids else ID_POOL.new()
 
-        log("\n[步骤 4/6] 生成奖励表...")
-        generate_reward_tables()
+        log("\n[步骤 4/6] 生成整合包介绍章节 + 奖励表...")
+        generate_intro_chapter(intro_group_id, item_ids)
+        generate_reward_tables(item_ids)
 
         log("\n[步骤 5/6] 逐章生成任务...")
         for i in range(cfg.TOTAL_CHAPTERS):
@@ -1019,7 +1244,9 @@ def main():
                     "key": "t1", "type": "checkmark", "id": "", "count": None,
                     "title": "待补充", "desc": "API 未返回有效任务", "dependencies": []
                 }]
-            filename, content = generate_chapter_snbt(i, quests, group_ids[ctx["group_index"]])
+            filename, content = generate_chapter_snbt(
+                i, quests, group_ids[ctx["group_index"]], item_ids
+            )
             path = os.path.join(cfg.CHAPTERS_OUTPUT_DIR, f"{filename}.snbt")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -1031,20 +1258,8 @@ def main():
         log("\n" + "=" * 60)
         log(" 全部完成！")
         log(f" 输出目录: {cfg.OUTPUT_DIR}")
-        log(" 部署方式:")
-        log("   把整个输出目录复制到 config/ftbquests/quests/")
-        log("   结构应为:")
-        log("     quests/")
-        log("       ├── data.snbt")
-        log("       ├── chapter_groups.snbt")
-        log("       ├── chapters/")
-        log("       │   └── chapter_XX.snbt")
-        log("       └── reward_tables/")
-        log("           └── *.snbt")
-        log("   进游戏执行 /ftbquests reload")
         log("=" * 60)
     finally:
-        # ▼ MC百科：退出前落盘缓存
         _save_mcmod_cache()
         close_log()
 

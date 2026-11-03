@@ -6,6 +6,11 @@ config.py —— ftb-bate 配置文件（白板模板）
 只需改这个文件，main.py 不用动。
 使用前请把下面所有 【TODO】 处填好。
 ========================================================
+支持任务类型：item / checkmark / structure / kill
+MC百科：仅作【模组级攻略补充】，不查具体物品
+章节图标：自动校验，不在 items.json 则回退到 minecraft:book
+整合包介绍：自动生成一个独立章节，放在所有章节组之前
+========================================================
 """
 import os
 
@@ -28,38 +33,63 @@ REWARDS_OUTPUT_DIR  = os.path.join(OUTPUT_DIR, "reward_tables")
 API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
 # 默认 DeepSeek；想换 OpenAI 兼容端点或 Ollama 就改这两个环境变量
+# 官方模型名：deepseek-chat / deepseek-reasoner
 BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
-MODEL    = os.environ.get("LLM_MODEL", "deepseek-flash")
+MODEL    = os.environ.get("LLM_MODEL", "deepseek-chat")
 
 
-# ==================== MC 百科补充 ====================
-# 让脚本访问 MC 百科，把物品/实体的中文名、简介补充进提示词
-# 【TODO】填入你实际可用的 MC 百科接口地址（mcmod.cn 无官方 API）
-ENABLE_MCMOD_LOOKUP = True                     # 总开关：False 则完全不请求 MC 百科
-MCMOD_API_BASE      = "https://mcmod.cn"       # 百科地址；有非官方 API 就换成实际地址
-MCMOD_TIMEOUT       = 10                       # 单次请求超时（秒）
-MCMOD_MAX_LOOKUP    = 8                        # 每批提示词最多查询几个 ID，控制请求量
-MCMOD_CACHE_FILE    = os.path.join(BASE_DIR, "mcmod_cache.json")  # 本地缓存，避免重复请求
+# ==================== MC 百科补充（模组级攻略） ====================
+# 注意：MC 百科只做【模组级】攻略补充，不查具体物品 ID。
+# 查询时用 modlist.txt 里的模组中文名 + ID 后半段拼接，命中模组页或攻略页。
+ENABLE_MCMOD_LOOKUP = True
+MCMOD_API_BASE      = "https://search.mcmod.cn/s"
+MCMOD_TIMEOUT       = 10
+MCMOD_MAX_LOOKUP    = 8
+MCMOD_CACHE_FILE    = os.path.join(BASE_DIR, "mcmod_cache.json")
+
+# modlist.txt 找不到时的后备映射
+# 【TODO】按整合包补充
+MCMOD_KEYWORD_MAP = {
+    # "example_modid": "模组中文名",
+}
 
 
 # ==================== 语言 ====================
-# "zh" = 中文任务标题/描述
-# "en" = English quest titles/descriptions
 QUEST_LANGUAGE = "zh"
+
+
+# ==================== 模组 ID 前缀 ====================
+# 【TODO】按整合包补充。章节前缀与奖励池会引用这里的键
+MOD = {
+    # "example": "example_modid",
+}
 
 
 # ==================== 任务书整体介绍 ====================
 # 会写进每次提示词开头，告诉 AI 这个整合包是什么
-# 【TODO】改成你的整合包简介
+# 【TODO】改成你的整合包简介（一两句话讲清主题）
 PACK_INTRO = (
     "这是一个 Minecraft 整合包。"
 )
 
 
+# ==================== 整合包介绍章节 ====================
+# 自动在所有章节组之前插入一个「整合包介绍」章节
+# 章节内容由 AI 根据 PACK_INTRO + 模组列表生成，不需要手写任务
+ENABLE_PACK_INTRO_CHAPTER = True
+PACK_INTRO_CHAPTER_TITLE  = "整合包介绍"
+PACK_INTRO_CHAPTER_FOCUS  = (
+    "向玩家介绍本整合包的核心主题、主要玩法、推荐游玩顺序。"
+    "任务以 checkmark 为主，让玩家读完介绍后点击确认即可。"
+)
+PACK_INTRO_CHAPTER_ICON   = "minecraft:book"
+PACK_INTRO_TASK_COUNT     = 3   # 介绍章节生成多少个任务
+
+
 # ==================== 生成规模 ====================
-TASKS_PER_CHAPTER = 55   # 每章目标任务数
-BATCH_SIZE        = 10   # 每次 API 请求生成多少任务
-FILE_RETRY        = 5    # 文件读取失败重试次数
+TASKS_PER_CHAPTER = 55
+BATCH_SIZE        = 10
+FILE_RETRY        = 5
 
 
 # ==================== 坐标布局 ====================
@@ -70,19 +100,24 @@ START_X      = 0.0
 START_Y      = 0.0
 
 
+# ==================== 章节图标 ====================
+# 章节 icon 字段若不在 items.json 中，自动回退到此图标
+# 防止游戏内显示紫黑方块/乱码
+ICON_FALLBACK = "minecraft:book"
+
+
 # ==================== 章节组配置 ====================
-# 【TODO】按你的整合包填写。示例已清空，只留一个占位章节。
+# 【TODO】按你的整合包填写。
 #
-# 每个组:
-#   title     组名（游戏里章节列表的分组标题）
-#   chapters  章节列表，每章字段:
-#       title            章节标题
-#       focus            本章主题描述（写入提示词）
-#       extra            整体要求描述（写入提示词）
-#       item_prefixes    物品模组前缀列表，如 ["twilightforest"]
-#       entity_prefixes  实体模组前缀列表，如 ["twilightforest", "legendary_monsters"]
-#       use_structures   是否使用 structure 任务
-#       icon             章节图标物品 ID（可留空字符串）
+# 每章字段:
+#   title            章节标题
+#   focus            本章主题描述（写入提示词）
+#   extra            整体要求描述（写入提示词）
+#   item_prefixes    物品模组前缀列表（空列表 = 使用全物品池）
+#   entity_prefixes  实体模组前缀列表（空列表 = 使用全实体池）
+#   use_structures   是否使用 structure 任务
+#   task_types       本章允许的任务类型（item / checkmark / structure / kill）
+#   icon             章节图标物品 ID（不在 items.json 时自动回退 ICON_FALLBACK）
 CHAPTER_GROUPS = [
     {
         "title": "默认组",
@@ -94,6 +129,7 @@ CHAPTER_GROUPS = [
                 "item_prefixes": [],
                 "entity_prefixes": [],
                 "use_structures": False,
+                "task_types": ["item", "checkmark"],
                 "icon": "",
             },
         ],
@@ -101,9 +137,8 @@ CHAPTER_GROUPS = [
 ]
 
 
-# ==================== 奖励表定义 ====================
-# 每个 key 会生成 reward_tables/<key>.snbt
-# 任务中的 random 奖励会引用这些真实存在的表
+# ==================== 奖励表定义（手写后备） ====================
+# 仅当 REWARD_AUTO_FROM_ITEMS = False 或物品池为空时使用
 REWARD_TABLES = {
     "basic": {
         "title": "基础奖励",
@@ -123,6 +158,15 @@ REWARD_TABLES = {
             {"item": "minecraft:enchanted_golden_apple", "count": 1, "weight": 5},
         ],
     },
+    "cultivation": {
+        "title": "修炼者奖励",
+        "entries": [
+            {"item": "minecraft:emerald", "count": 3, "weight": 25},
+            {"item": "minecraft:diamond", "count": 2, "weight": 20},
+            {"item": "minecraft:experience_bottle", "count": 4, "weight": 20},
+            {"item": "minecraft:gold_ingot", "count": 4, "weight": 15},
+        ],
+    },
     "endgame": {
         "title": "终局奖励",
         "entries": [
@@ -133,6 +177,30 @@ REWARD_TABLES = {
         ],
     },
 }
+
+
+# ==================== 奖励物品自动构建 ====================
+REWARD_AUTO_FROM_ITEMS = True
+REWARD_TABLE_SIZE = 4
+REWARD_ITEM_COUNT_RANGE = (1, 3)
+
+# 【TODO】奖励表物品池映射：table_key -> 前缀列表（空列表 = 使用全部物品）
+REWARD_TABLE_POOLS = {
+    "basic":       ["minecraft"],
+    "structure":   [],
+    "cultivation": [],
+    "endgame":     [],
+}
+
+REWARD_ITEM_BLACKLIST = [
+    "minecraft:air", "minecraft:barrier", "minecraft:structure_void",
+    "minecraft:command_block", "minecraft:chain_command_block",
+    "minecraft:repeating_command_block", "minecraft:debug_stick",
+    "minecraft:bedrock", "minecraft:light", "minecraft:structure_block",
+    "minecraft:jigsaw", "minecraft:knowledge_book",
+]
+
+REWARD_ITEM_BLACKLIST_KEYWORDS = []
 
 
 # ==================== 辅助函数 ====================
@@ -148,6 +216,5 @@ def flatten_chapters():
     return flat
 
 
-# 自动推导，不要在 main.py 里手写
 TOTAL_CHAPTERS = len(flatten_chapters())
 CHAPTER_TITLES = [ch["title"] for ch in flatten_chapters()]
