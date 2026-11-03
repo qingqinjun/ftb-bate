@@ -10,6 +10,7 @@ config.py —— ftb-bate 配置文件（白板模板）
 MC百科：仅作【模组级攻略补充】，不查具体物品
 章节图标：自动校验，不在 items.json 则回退到 minecraft:book
 整合包介绍：自动生成一个独立章节，放在所有章节组之前
+奖励系统：支持基于任务难度的动态奖励（默认开启）
 ========================================================
 """
 import os
@@ -106,6 +107,88 @@ START_Y      = 0.0
 ICON_FALLBACK = "minecraft:book"
 
 
+# ==================== ▼ 难度奖励配置（新增） ====================
+# 是否启用基于任务难度的动态奖励
+# True  = 每个任务根据其难度自动生成专属奖励表
+# False = 使用下方 REWARD_TABLES 手写奖励表（原逻辑）
+ENABLE_DIFFICULTY_REWARDS = True
+
+# 各难度等级配置
+# 系统根据任务类型/数量/依赖深度/稀有模组 综合评分 → 1~5 级
+# 每级决定：物品数量范围、权重范围、loot_size
+DIFFICULTY_TIERS = {
+    "trivial": {   # 难度 1 —— 简单任务（如 checkmark、单个常见物品）
+        "weight_range": (1, 2),        # 单个物品的权重范围
+        "item_count_range": (1, 2),    # 奖励物品种类数量范围
+        "description": "简单任务",
+    },
+    "easy": {      # 难度 2 —— 普通任务（如收集几个普通物品）
+        "weight_range": (2, 4),
+        "item_count_range": (2, 4),
+        "description": "普通任务",
+    },
+    "medium": {    # 难度 3 —— 中等任务（如击杀中等数量怪物、收集多个物品）
+        "weight_range": (3, 6),
+        "item_count_range": (3, 6),
+        "description": "中等任务",
+    },
+    "hard": {      # 难度 4 —— 困难任务（如复杂结构探索、大量击杀）
+        "weight_range": (5, 10),
+        "item_count_range": (5, 10),
+        "description": "困难任务",
+    },
+    "extreme": {   # 难度 5 —— 极限任务（如终局 BOSS、稀有模组收集）
+        "weight_range": (8, 16),
+        "item_count_range": (8, 20),
+        "description": "极限任务",
+    },
+}
+
+# 任务类型基础难度分（分越高 = 难度等级越高）
+# 评分公式：raw = 类型分 + count * COUNT_FACTOR + 依赖深度 * DEPTH_WEIGHT + 稀有模组加成
+# raw ≤ 1.5 → Lv1, ≤ 2.5 → Lv2, ≤ 4.0 → Lv3, ≤ 6.0 → Lv4, > 6.0 → Lv5
+TASK_TYPE_DIFFICULTY = {
+    "checkmark": 1,   # 点击确认类，最简单
+    "item":      2,   # 收集物品
+    "kill":      3,   # 击杀实体，更难
+    "structure": 4,   # 探索结构，最难
+}
+
+# count 对难度的贡献系数
+# 例：kill 类型 count=10 → 贡献 10 * 0.3 = 3.0 分
+COUNT_DIFFICULTY_FACTOR = 0.3
+
+# 依赖深度权重
+# 例：某任务依赖链深度为 3 → 贡献 3 * 0.5 = 1.5 分
+DEP_DEPTH_WEIGHT = 0.5
+
+# 稀有模组前缀列表
+# 如果任务关联的物品/实体属于这些模组，额外 +1 难度分
+# 【TODO】按整合包中后期/高级模组补充
+RARE_MOD_PREFIXES = [
+    # "botania",
+    # "draconicevolution",
+    # "mekanism",
+    # "ae2",
+]
+
+# 难度奖励兜底物品池
+# 当物品池不足或为空时使用，确保每张奖励表都有内容
+REWARD_FALLBACK_POOL = [
+    "minecraft:emerald",
+    "minecraft:diamond",
+    "minecraft:gold_ingot",
+    "minecraft:iron_ingot",
+    "minecraft:experience_bottle",
+    "minecraft:elytra",
+    "minecraft:enchanted_golden_apple",
+]
+
+# 难度奖励表命名前缀（生成的表会以此开头，便于调试）
+DIFFICULTY_TABLE_PREFIX = "diff"
+# ==================== ▲ 难度奖励配置 ====================
+
+
 # ==================== 章节组配置 ====================
 # 【TODO】按你的整合包填写。
 #
@@ -138,7 +221,7 @@ CHAPTER_GROUPS = [
 
 
 # ==================== 奖励表定义（手写后备） ====================
-# 仅当 REWARD_AUTO_FROM_ITEMS = False 或物品池为空时使用
+# 仅当 ENABLE_DIFFICULTY_REWARDS = False 或物品池为空时使用
 REWARD_TABLES = {
     "basic": {
         "title": "基础奖励",

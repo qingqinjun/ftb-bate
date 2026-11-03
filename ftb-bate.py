@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ========================================================
-ftb-bate —— FTB Quests 任务书自动生成器
+ftb-bate —— FTB Quests 任务书自动生成器--本程序完全免费
 ========================================================
 支持：
   - 章节组 / 章节 / 任务三层结构
@@ -15,6 +15,7 @@ ftb-bate —— FTB Quests 任务书自动生成器
   - 数据文件递归解包
   - 任务语言切换（zh / en）
   - MC 百科：模组级攻略补充，优先读 modlist.txt 的模组中文名
+  - 【新增】奖励跟随任务难度动态变化
 ========================================================
 """
 import json
@@ -521,6 +522,13 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         type_lines.append('kill 类型：必须从【可用实体 ID】逐字复制 "id"，并给 "count"')
     type_hint = "本章允许的任务类型：\n- " + "\n- ".join(type_lines)
 
+    # 难度感知：批次越靠后难度越高
+    difficulty_hint = (
+        f"【难度感知】当前是第 {batch_index + 1} 批，"
+        f"批次越靠后任务应越难（count 更大、依赖更深、优先用高难度任务类型）。"
+        f"奖励会根据难度自动调整。"
+    )
+
     return f"""你是 Minecraft FTB Quests 任务书设计师。{cfg.PACK_INTRO}
 
 为第 {chapter_index + 1} 章「{ctx["title"]}」生成第 {batch_index + 1} 批任务，共 {cfg.BATCH_SIZE} 个。
@@ -528,6 +536,7 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 【本章焦点】{ctx["focus"]}
 【整体要求】{ctx["extra"]}
 【串联要求】{chain_hint}
+{difficulty_hint}
 
 【已有任务 key 列表】（dependencies 只能从这里选，或选本批前面任务的 key）：
 {json.dumps(prev_keys, ensure_ascii=False)}
@@ -588,6 +597,12 @@ def _prompt_en(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
         type_lines.append('kill quest: "id" MUST be copied verbatim; add integer "count"')
     type_hint = "Allowed quest types:\n- " + "\n- ".join(type_lines)
 
+    difficulty_hint = (
+        f"[Difficulty] This is batch {batch_index + 1}; later batches should be harder "
+        f"(higher count, deeper dependencies, prefer harder task types). "
+        f"Rewards scale with difficulty automatically."
+    )
+
     return f"""You are a Minecraft FTB Quests designer. {cfg.PACK_INTRO}
 
 Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}", total {cfg.BATCH_SIZE} quests.
@@ -595,6 +610,7 @@ Generate batch {batch_index + 1} of Chapter {chapter_index + 1} "{ctx["title"]}"
 [Chapter focus] {ctx["focus"]}
 [Overall requirements] {ctx["extra"]}
 [Chaining rule] {chain_hint}
+{difficulty_hint}
 
 [Existing quest keys]:
 {json.dumps(prev_keys, ensure_ascii=False)}
@@ -935,333 +951,497 @@ def build_reward_table_snbt(key, item_pool=None):
         entries.append(
             f'{{type:"item",item:"{e["item"]}",count:{e["count"]},weight:{e.get("weight",1)}}}'
         )
+    title = spec.get("title", key)
     table_id = _reward_table_id(key)
     return table_id, f'''{{
     id: "{table_id}"
-    title: "{spec["title"]}"
-    loot_size: 1
+    title: "{title}"
+    loot_size: {spec.get("loot_size", 1)}
     entries: [
         {",".join(entries)}
     ]
 }}'''
 
 
-def build_reward_snbt(quest_type, table_id, item_pool=None):
-    rewards = []
-    if quest_type == "structure":
-        xp = random.choice([30, 40, 50, 60])
-        item_chance, random_chance = 1.0, 0.6
-    elif quest_type == "kill":
-        xp = random.choice([10, 15, 20, 25])
-        item_chance, random_chance = 0.6, 0.3
+# ============================================================
+# ================== ▼ 难度奖励系统（新增） ==================
+# ============================================================
+
+def _default_difficulty_tiers():
+    """返回默认难度等级配置"""
+    return {
+        "trivial": {
+            "weight_range": (1, 2),
+            "item_count_range": (1, 2),
+            "reward_tables_ref": ["common"],
+            "description": "简单任务",
+        },
+        "easy": {
+            "weight_range": (2, 4),
+            "item_count_range": (2, 4),
+            "reward_tables_ref": ["common", "uncommon"],
+            "description": "普通任务",
+        },
+        "medium": {
+            "weight_range": (3, 6),
+            "item_count_range": (3, 6),
+            "reward_tables_ref": ["uncommon", "rare"],
+            "description": "中等任务",
+        },
+        "hard": {
+            "weight_range": (5, 10),
+            "item_count_range": (5, 10),
+            "reward_tables_ref": ["rare", "epic"],
+            "description": "困难任务",
+        },
+        "extreme": {
+            "weight_range": (8, 16),
+            "item_count_range": (8, 20),
+            "reward_tables_ref": ["epic", "legendary"],
+            "description": "极限任务",
+        },
+    }
+
+
+def _default_task_type_difficulty():
+    """返回默认任务类型基础难度"""
+    return {
+        "checkmark": 1,
+        "item": 2,
+        "kill": 3,
+        "structure": 4,
+    }
+
+
+def calc_task_difficulty(quest, all_quests):
+    """
+    计算单个任务的难度值（1-5）。
+    评分维度：
+      1. 任务类型基础分
+      2. count 贡献（count * COUNT_DIFFICULTY_FACTOR）
+      3. 依赖深度贡献（depth * DEP_DEPTH_WEIGHT）
+      4. 稀有模组加成（modid 在 RARE_MOD_PREFIXES 中 +1）
+    """
+    if not getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
+        return 1
+
+    type_base_map = getattr(cfg, "TASK_TYPE_DIFFICULTY",
+                            _default_task_type_difficulty())
+    type_base = type_base_map.get(quest["type"], 2)
+
+    # count 贡献
+    count_factor = getattr(cfg, "COUNT_DIFFICULTY_FACTOR", 0.3)
+    count_val = quest.get("count") or 1
+    count_score = count_val * count_factor
+
+    # 依赖深度
+    depth_weight = getattr(cfg, "DEP_DEPTH_WEIGHT", 0.5)
+    depth = _calc_dep_depth(quest, all_quests)
+    depth_score = depth * depth_weight
+
+    # 稀有模组加成
+    rare_mods = getattr(cfg, "RARE_MOD_PREFIXES", [])
+    mod_bonus = 0
+    qid = quest.get("id", "")
+    if ":" in qid:
+        modid = qid.split(":", 1)[0]
+        if modid in rare_mods:
+            mod_bonus = 1
+
+    raw = type_base + count_score + depth_score + mod_bonus
+
+    # 映射到 1-5
+    if raw <= 1.5:
+        return 1
+    elif raw <= 2.5:
+        return 2
+    elif raw <= 4.0:
+        return 3
+    elif raw <= 6.0:
+        return 4
     else:
-        xp = random.choice([5, 10, 15, 20])
-        item_chance, random_chance = 0.5, 0.2
-
-    rewards.append(f'{{type:"xp",amount:{xp}}}')
-
-    if random.random() < item_chance:
-        rid = _pick_random_item_for_quest(item_pool)
-        lo, hi = getattr(cfg, "REWARD_ITEM_COUNT_RANGE", (1, 3))
-        cnt = random.randint(lo, hi)
-        rewards.append(f'{{type:"item",item:"{rid}",count:{cnt}}}')
-
-    if random.random() < random_chance and table_id:
-        rewards.append(f'{{type:"random",count:1,table_id:"{table_id}"}}')
-
-    return "[" + ",".join(rewards) + "]"
+        return 5
 
 
-# ==================== SNBT 生成 ====================
-def build_snbt_quest(quest, key_to_id, x, y, reward_table_id, item_pool=None):
-    qid = key_to_id[quest["key"]]
-    title = quest["title"].replace('"', '\\"')
-    desc = quest["desc"].replace('"', '\\"')
-    deps = [key_to_id[d] for d in quest["dependencies"] if d in key_to_id]
-    dep_str = "[" + ", ".join(f'"{d}"' for d in deps) + "]" if deps else "[]"
+def _calc_dep_depth(quest, all_quests):
+    """计算任务在依赖图中的最大深度"""
+    key_to_quest = {q["key"]: q for q in all_quests}
+    visited = set()
+    max_depth = 0
 
-    if quest["type"] == "item":
-        cnt = quest.get("count") or 1
-        tasks = f'[{{type:"item",item:"{quest["id"]}",count:{cnt}}}]'
-    elif quest["type"] == "structure":
-        tasks = f'[{{type:"structure",structure:"{quest["id"]}"}}]'
-    elif quest["type"] == "kill":
-        cnt = quest.get("count") or 1
-        tasks = f'[{{type:"kill",entity:"{quest["id"]}",count:{cnt}}}]'
+    def dfs(node_key, current_depth):
+        nonlocal max_depth
+        if node_key in visited:
+            return
+        visited.add(node_key)
+        max_depth = max(max_depth, current_depth)
+        node = key_to_quest.get(node_key)
+        if node:
+            for dep in node.get("dependencies", []):
+                dfs(dep, current_depth + 1)
+
+    dfs(quest["key"], 0)
+    return max_depth
+
+
+def difficulty_to_tier_name(difficulty):
+    """难度值 1-5 -> 等级名"""
+    mapping = {
+        1: "trivial",
+        2: "easy",
+        3: "medium",
+        4: "hard",
+        5: "extreme",
+    }
+    return mapping.get(difficulty, "easy")
+
+
+def _tier_for_difficulty(difficulty):
+    """根据难度值获取等级配置"""
+    tiers = getattr(cfg, "DIFFICULTY_TIERS", _default_difficulty_tiers())
+    tier_name = difficulty_to_tier_name(difficulty)
+    return tiers.get(tier_name, tiers.get("easy", {}))
+
+
+def _select_reward_items_for_tier(tier, item_pool, fallback_pool):
+    """
+    根据等级配置选择奖励物品。
+    策略：
+      - 物品数量 = tier.item_count_range 内随机
+      - 优先从 item_pool 选，不够时混入 fallback_pool
+    """
+    lo, hi = tier.get("item_count_range", (1, 3))
+    n = random.randint(int(lo), max(int(lo), int(hi)))
+
+    pool = list(item_pool) if item_pool else []
+    pool = [i for i in pool if not _is_reward_blacklisted(i)]
+
+    fb = list(fallback_pool) if fallback_pool else []
+    fb = [i for i in fb if not _is_reward_blacklisted(i)]
+
+    if len(pool) < n:
+        pool = pool + fb
+
+    if not pool:
+        return []
+
+    n = min(n, len(pool))
+    return random.sample(pool, n)
+
+
+def _build_single_reward_table(quest, difficulty, item_pool, fallback_pool):
+    """
+    为单个任务构建一张专属奖励表 SNBT。
+    返回 (table_id, snbt, tier_name)
+    """
+    tier = _tier_for_difficulty(difficulty)
+    tier_name = difficulty_to_tier_name(difficulty)
+    table_id = _reward_table_id(f"diff_{quest['key']}_{difficulty}")
+
+    picks = _select_reward_items_for_tier(tier, item_pool, fallback_pool)
+
+    entries = []
+    if picks:
+        weight_range = tier.get("weight_range", (1, 3))
+        lo, hi = tier.get("item_count_range", (1, 3))
+        for iid in picks:
+            w = random.randint(int(weight_range[0]), int(weight_range[1]))
+            cnt = random.randint(int(lo), max(int(lo), int(hi)))
+            entries.append(
+                f'{{type:"item",item:"{iid}",count:{cnt},weight:{w}}}'
+            )
     else:
-        tasks = '[{type:"checkmark"}]'
+        # 兜底：至少给一个经验瓶
+        entries.append(
+            f'{{type:"item",item:"minecraft:experience_bottle",count:1,weight:1}}'
+        )
 
-    rewards = build_reward_snbt(quest["type"], reward_table_id, item_pool)
+    loot_size = 1 if difficulty <= 3 else random.randint(1, 2)
 
-    return f'''        {{
-            id: "{qid}"
-            x: {x}d
-            y: {y}d
-            dependencies: {dep_str}
-            tasks: {tasks}
-            rewards: {rewards}
-            title: "{title}"
-            description: ["{desc}"]
-        }}'''
-
-
-def generate_chapter_snbt(chapter_index, quests, group_id, item_ids,
-                          icon_override=None, title_override=None, filename_override=None):
-    ctx = chapter_context(chapter_index) if chapter_index is not None else {}
-    chapter_id = ID_POOL.new()
-
-    if filename_override:
-        filename = filename_override
-    elif chapter_index is not None:
-        filename = f"chapter_{chapter_index + 1:02d}"
-    else:
-        filename = "chapter_intro"
-
-    title = title_override or ctx.get("title", "章节")
-
-    key_to_id = {q["key"]: ID_POOL.new() for q in quests}
-
-    chapter_pool = (filter_by_prefix(item_ids, ctx.get("item_prefixes", []))
-                    if ctx.get("item_prefixes") else item_ids[:])
-    if not chapter_pool:
-        chapter_pool = item_ids[:]
-
-    if ctx.get("use_structures"):
-        rtable_key = "structure"
-    elif chapter_index is not None and chapter_index >= cfg.TOTAL_CHAPTERS - 1:
-        rtable_key = "endgame"
-    elif chapter_index is not None and chapter_index < 4:
-        rtable_key = "cultivation"
-    else:
-        rtable_key = "basic"
-    reward_table_id = _reward_table_id(rtable_key)
-
-    parts = []
-    for idx, q in enumerate(quests):
-        col = idx % cfg.COLS_PER_ROW
-        row = idx // cfg.COLS_PER_ROW
-        x = cfg.START_X + col * cfg.COL_SPACING
-        y = cfg.START_Y - row * cfg.ROW_SPACING
-        parts.append(build_snbt_quest(q, key_to_id, x, y,
-                                      reward_table_id, chapter_pool))
-
-    icon = icon_override if icon_override is not None else ctx.get("icon", "")
-    icon = resolve_icon(icon, set(item_ids)) if icon else ""
-    icon_line = f'    icon: "{icon}"\n' if icon else ""
-
-    content = f'''{{
-    filename: "{filename}"
-    id: "{chapter_id}"
-    group: "{group_id}"
-    order_index: 0
-    title: "{title}"
-{icon_line}    quests: [
-{",".join(parts)}
+    snbt = f'''{{
+    id: "{table_id}"
+    title: "{quest["title"][:20]} (Lv{difficulty})"
+    loot_size: {loot_size}
+    entries: [
+        {",".join(entries)}
     ]
 }}'''
-    return filename, content
+
+    return table_id, snbt, tier_name
 
 
-# ==================== 章节组 / 全局配置 ====================
-def generate_chapter_groups():
-    group_ids = []
-    parts = []
-    for g in cfg.CHAPTER_GROUPS:
-        gid = ID_POOL.new()
-        group_ids.append(gid)
-        parts.append(f'        {{id:"{gid}",title:"{g["title"]}"}}')
-    content = '{\n    chapter_groups: [\n' + ",\n".join(parts) + '\n    ]\n}'
-    path = os.path.join(cfg.OUTPUT_DIR, "chapter_groups.snbt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    log(f"[输出] chapter_groups.snbt 已生成: {path}")
-    return group_ids
+def assign_difficulty_rewards(quests, item_pool):
+    """
+    为所有任务分配基于难度的奖励。
 
+    参数:
+        quests: 所有任务列表
+        item_pool: 可用物品 ID 池
 
-def generate_data_snbt():
-    content = '''{
-    default_autoclaim_rewards: "disabled"
-    default_consume_items: false
-    default_quest_disable_jei: false
-    default_quest_shape: "circle"
-    default_reward_team: false
-}'''
-    path = os.path.join(cfg.OUTPUT_DIR, "data.snbt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    log(f"[输出] data.snbt 已生成: {path}")
+    返回:
+        dict: {quest_key: {"table_id": str, "snbt": str,
+                           "difficulty": int, "tier": str}}
+    """
+    if not getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
+        return {}
 
+    fallback_pool = getattr(cfg, "REWARD_FALLBACK_POOL", _REWARD_FALLBACK_POOL)
 
-def generate_reward_tables(item_ids):
-    os.makedirs(cfg.REWARDS_OUTPUT_DIR, exist_ok=True)
-    pools_map = getattr(cfg, "REWARD_TABLE_POOLS", {})
-    for key in cfg.REWARD_TABLES:
-        prefixes = pools_map.get(key, [])
-        pool = filter_by_prefix(item_ids, prefixes) if prefixes else item_ids[:]
-        if not pool:
-            log(f"  [提示] 奖励表 {key} 无对应物品池，将使用后备池")
-            pool = item_ids[:]
+    log(f"[难度奖励] 开始为 {len(quests)} 个任务计算难度并生成奖励...")
 
-        table_id, content = build_reward_table_snbt(key, pool)
-        path = os.path.join(cfg.REWARDS_OUTPUT_DIR, f"{key}.snbt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        log(f"[输出] reward_tables/{key}.snbt -> id={table_id}（候选 {len(pool)} 个）")
+    reward_map = {}
+    diff_distribution = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
 
+    for q in quests:
+        diff = calc_task_difficulty(q, quests)
+        diff_distribution[diff] = diff_distribution.get(diff, 0) + 1
 
-# ==================== 整合包介绍章节 ====================
-def generate_intro_chapter(group_id, item_ids):
-    if not getattr(cfg, "ENABLE_PACK_INTRO_CHAPTER", False):
-        return None
-
-    title = getattr(cfg, "PACK_INTRO_CHAPTER_TITLE", "整合包介绍")
-    icon = getattr(cfg, "PACK_INTRO_CHAPTER_ICON", "minecraft:book")
-
-    log(f"\n[介绍章节] 生成「{title}」...")
-    prompt = build_intro_prompt()
-    batch = call_deepseek(prompt)
-    if not batch:
-        log(f"  [警告] 介绍章节 AI 无返回，跳过")
-        return None
-
-    allowed = ["checkmark"]
-    cleaned = normalize_batch(batch, [], 0, [], [], allowed)
-    if not cleaned:
-        log(f"  [警告] 介绍章节无有效任务，跳过")
-        return None
-
-    n_cycles = break_cycles(cleaned)
-    if n_cycles:
-        log(f"  [修复] 断开 {n_cycles} 条循环依赖")
-
-    filename, content = generate_chapter_snbt(
-        None, cleaned, group_id, item_ids,
-        icon_override=icon,
-        title_override=title,
-        filename_override="chapter_00",
-    )
-    path = os.path.join(cfg.CHAPTERS_OUTPUT_DIR, f"{filename}.snbt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    log(f"  -> 已输出: {path}（{len(cleaned)} 个任务）")
-    return filename
-
-
-# ==================== 章节生成 ====================
-def generate_chapter(item_ids, structures, entity_ids, chapter_index):
-    all_quests = []
-    batches = (cfg.TASKS_PER_CHAPTER + cfg.BATCH_SIZE - 1) // cfg.BATCH_SIZE
-    valid_structures = set(structures)
-    valid_entities   = set(entity_ids)
-
-    allowed_types = list(chapter_context(chapter_index)["task_types"])
-    if not structures and "structure" in allowed_types:
-        allowed_types.remove("structure")
-    if not entity_ids and "kill" in allowed_types:
-        allowed_types.remove("kill")
-    if not allowed_types:
-        allowed_types = ["item", "checkmark"]
-
-    for b in range(batches):
-        log(f"    批次 {b+1}/{batches} ...")
-        prompt = build_prompt(item_ids, structures, entity_ids,
-                              chapter_index, b, all_quests)
-        batch = call_deepseek(prompt)
-        if not batch:
-            log(f"    [警告] 批次 {b+1} 无结果，跳过")
-            continue
-        cleaned = normalize_batch(
-            batch, all_quests, b,
-            valid_structures, valid_entities,
-            allowed_types,
+        table_id, snbt, tier_name = _build_single_reward_table(
+            q, diff, item_pool, fallback_pool
         )
-        all_quests.extend(cleaned)
-        log(f"    本批 {len(cleaned)} 个，累计 {len(all_quests)} 个")
 
-    n_cycles = break_cycles(all_quests)
-    if n_cycles:
-        log(f"    [修复] 断开 {n_cycles} 条循环依赖")
+        reward_map[q["key"]] = {
+            "table_id": table_id,
+            "snbt": snbt,
+            "difficulty": diff,
+            "tier": tier_name,
+        }
 
-    return all_quests
+    log(f"[难度奖励] 难度分布: " + ", ".join(
+        f"Lv{k}={v}" for k, v in sorted(diff_distribution.items()) if v > 0
+    ))
+    log(f"[难度奖励] 共生成 {len(reward_map)} 张难度奖励表")
+
+    return reward_map
+
+
+def build_difficulty_reward_tables(quests, item_pool):
+    """
+    批量生成所有难度奖励表。
+
+    返回:
+        tuple: (reward_tables_dict, quest_reward_map)
+          - reward_tables_dict: {table_id: snbt} 用于写入 reward_tables 文件
+          - quest_reward_map: {quest_key: table_id} 用于任务引用
+    """
+    reward_map = assign_difficulty_rewards(quests, item_pool)
+
+    tables = {}
+    q_to_table = {}
+    for qkey, info in reward_map.items():
+        tables[info["table_id"]] = info["snbt"]
+        q_to_table[qkey] = info["table_id"]
+
+    return tables, q_to_table
+
+
+def attach_rewards_to_quests(quests, item_pool):
+    """
+    便捷函数：计算难度奖励并挂载到任务对象上。
+    每个任务会增加 "reward_table_id" 字段。
+
+    参数:
+        quests: 所有任务列表（会被原地修改）
+        item_pool: 可用物品 ID 池
+
+    返回:
+        dict: {table_id: snbt} 所有生成的奖励表
+    """
+    if not getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
+        return {}
+
+    tables, q_to_table = build_difficulty_reward_tables(quests, item_pool)
+
+    for q in quests:
+        if q["key"] in q_to_table:
+            q["reward_table_id"] = q_to_table[q["key"]]
+
+    return tables
+
+
+# ============================================================
+# ================== ▲ 难度奖励系统 ==========================
+# ============================================================
 
 
 # ==================== 主流程 ====================
 def main():
+    random.seed(getattr(cfg, "RANDOM_SEED", None))
+    if getattr(cfg, "RANDOM_SEED", None) is not None:
+        log(f"[随机] 已设置随机种子: {cfg.RANDOM_SEED}")
+
+    init_log(getattr(cfg, "LOG_FILE", "logs/ftb_bate.log"))
+    log(f"===== FTB Quests 任务书生成器启动 =====")
+    log(f"[时间] {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    log(f"[语言] {'English' if is_en() else '中文'}")
+    log(f"[难度奖励] {'开启' if getattr(cfg, 'ENABLE_DIFFICULTY_REWARDS', True) else '关闭'}")
+
+    # ---- 加载数据 ----
+    items_path = getattr(cfg, "ITEMS_FILE", "data/items.json")
+    structs_path = getattr(cfg, "STRUCTURES_FILE", "data/structure_dump.txt")
+    modlist_path = getattr(cfg, "MODLIST_FILE", "data/modlist.txt")
+    entities_path = getattr(cfg, "ENTITIES_FILE", "data/entities_list.json")
+
+    _load_mcmod_cache()
+
     global _modlist_map
+    _modlist_map = load_modlist(modlist_path)
+    item_names = load_items(items_path)
+    item_ids = list(item_names.keys())
+    structures = load_structures(structs_path)
+    entity_ids = list(load_entities(entities_path).keys())
 
-    init_log(os.path.join(cfg.OUTPUT_DIR, "generate.log"))
-    try:
-        log("=" * 60)
-        log(" ftb-bate · FTB Quests 任务书自动生成器")
-        log(f" 语言: {'English' if is_en() else '中文'}")
-        log(f" 输出目录: {cfg.OUTPUT_DIR}")
-        log(f" MC百科: {'开启' if getattr(cfg, 'ENABLE_MCMOD_LOOKUP', False) else '关闭'}")
-        log(f" 奖励: {'动态构建' if getattr(cfg, 'REWARD_AUTO_FROM_ITEMS', False) else '手写表'}")
-        log(f" 介绍章节: {'开启' if getattr(cfg, 'ENABLE_PACK_INTRO_CHAPTER', False) else '关闭'}")
-        log("=" * 60)
+    log(f"[汇总] 物品 {len(item_ids)} | 结构 {len(structures)} | 实体 {len(entity_ids)} | 模组 {len(_modlist_map)}")
 
-        if not cfg.API_KEY:
-            log("[错误] 未检测到 DEEPSEEK_API_KEY 环境变量")
-            sys.exit(1)
-        if cfg.TOTAL_CHAPTERS <= 0:
-            log("[错误] CHAPTER_GROUPS 中没有章节")
-            sys.exit(1)
+    # ---- 生成整合包介绍章节 ----
+    all_quests = []
+    intro_quests = []
 
-        _load_mcmod_cache()
+    if getattr(cfg, "GENERATE_PACK_INTRO", True):
+        log("\n===== 生成整合包介绍章节 =====")
+        intro_prompt = build_intro_prompt()
+        for attempt in range(2):
+            batch = call_deepseek(intro_prompt)
+            if batch:
+                break
+            log("  [重试] 整合包介绍章节生成失败，重试...")
 
-        log("\n[步骤 1/6] 加载数据文件...")
-        items      = load_items(cfg.ITEMS_FILE)
-        item_ids   = list(items.keys())
-        structures = load_structures(cfg.STRUCTURE_FILE)
-        _modlist_map = load_modlist(cfg.MODLIST_FILE)
-        entities   = load_entities(cfg.ENTITIES_FILE)
-        entity_ids = list(entities.keys())
-
-        if not item_ids:
-            log("[警告] items.json 为空")
-
-        log("\n[步骤 2/6] 准备输出目录...")
-        os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-        os.makedirs(cfg.CHAPTERS_OUTPUT_DIR, exist_ok=True)
-        os.makedirs(cfg.REWARDS_OUTPUT_DIR, exist_ok=True)
-
-        log("\n[步骤 3/6] 生成章节组...")
-        group_ids = generate_chapter_groups()
-        intro_group_id = group_ids[0] if group_ids else ID_POOL.new()
-
-        log("\n[步骤 4/6] 生成整合包介绍章节 + 奖励表...")
-        generate_intro_chapter(intro_group_id, item_ids)
-        generate_reward_tables(item_ids)
-
-        log("\n[步骤 5/6] 逐章生成任务...")
-        for i in range(cfg.TOTAL_CHAPTERS):
-            ctx = chapter_context(i)
-            log(f"\n[{i+1}/{cfg.TOTAL_CHAPTERS}] 生成「{ctx['title']}」...")
-            quests = generate_chapter(item_ids, structures, entity_ids, i)
-            if not quests:
-                log(f"  [警告] 第 {i+1} 章无有效任务，使用占位任务")
-                quests = [{
-                    "key": "t1", "type": "checkmark", "id": "", "count": None,
-                    "title": "待补充", "desc": "API 未返回有效任务", "dependencies": []
-                }]
-            filename, content = generate_chapter_snbt(
-                i, quests, group_ids[ctx["group_index"]], item_ids
+        if batch:
+            intro_quests = normalize_batch(
+                batch, [], 0,
+                valid_structures=set(structures),
+                valid_entities=set(entity_ids),
+                allowed_types=["checkmark"],
             )
-            path = os.path.join(cfg.CHAPTERS_OUTPUT_DIR, f"{filename}.snbt")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            log(f"  -> 已输出: {path}（{len(quests)} 个任务）")
+            for i, q in enumerate(intro_quests):
+                q["dependencies"] = [] if i == 0 else [intro_quests[i - 1]["key"]]
+            all_quests.extend(intro_quests)
+            log(f"  [完成] 整合包介绍章节: {len(intro_quests)} 个任务")
 
-        log("\n[步骤 6/6] 生成全局配置 data.snbt...")
-        generate_data_snbt()
+    # ---- 逐章生成 ----
+    flat = cfg.flatten_chapters()
+    log(f"\n===== 共 {len(flat)} 个章节，开始生成 =====")
 
-        log("\n" + "=" * 60)
-        log(" 全部完成！")
-        log(f" 输出目录: {cfg.OUTPUT_DIR}")
-        log("=" * 60)
-    finally:
-        _save_mcmod_cache()
-        close_log()
+    for ci, ch in enumerate(flat):
+        log(f"\n----- 第 {ci+1}/{len(flat)} 章: {ch['title']} -----")
+        ctx = chapter_context(ci)
+
+        n_batches = ch.get("batches", 1)
+        chapter_quests = []
+
+        for bi in range(n_batches):
+            log(f"  [批次 {bi+1}/{n_batches}]")
+            prompt = build_prompt(
+                item_ids, structures, entity_ids,
+                ci, bi, chapter_quests
+            )
+
+            batch = call_deepseek(prompt)
+            if not batch:
+                log(f"    [跳过] 批次 {bi+1} 生成失败")
+                continue
+
+            cleaned = normalize_batch(
+                batch, chapter_quests, bi,
+                valid_structures=set(structures),
+                valid_entities=set(entity_ids),
+                allowed_types=ctx["task_types"],
+            )
+
+            # 第一批的第一个任务依赖置空
+            if not chapter_quests and cleaned:
+                cleaned[0]["dependencies"] = []
+
+            chapter_quests.extend(cleaned)
+            log(f"    [完成] 本批次 {len(cleaned)} 个任务，本章累计 {len(chapter_quests)} 个")
+
+        # 本章内循环检测
+        if chapter_quests:
+            n_fixed = break_cycles(chapter_quests)
+            if n_fixed:
+                log(f"    [循环修复] 断开了 {n_fixed} 个循环依赖")
+
+        all_quests.extend(chapter_quests)
+
+    # ---- 全局循环检测 ----
+    log(f"\n===== 全局循环检测 =====")
+    total_fixed = break_cycles(all_quests)
+    if total_fixed:
+        log(f"  [全局循环修复] 断开了 {total_fixed} 个循环依赖")
+    else:
+        log(f"  [全局循环检测] 无循环依赖 ✓")
+
+    # ==================== ▼ 难度奖励生成 ====================
+    difficulty_tables = {}
+    if getattr(cfg, "ENABLE_DIFFICULTY_REWARDS", True):
+        log(f"\n===== 难度奖励生成 =====")
+        difficulty_tables = attach_rewards_to_quests(all_quests, item_ids)
+
+        # 日志输出部分任务的奖励信息
+        sample_n = min(5, len(all_quests))
+        log(f"  [预览] 前 {sample_n} 个任务的奖励:")
+        for q in all_quests[:sample_n]:
+            if "reward_table_id" in q:
+                diff = calc_task_difficulty(q, all_quests)
+                log(f"    - {q['key']} ({q['type']}, Lv{diff}): {q.get('reward_table_id', 'N/A')[:16]}...")
+    else:
+        log(f"\n===== 难度奖励已关闭，跳过 =====")
+    # ==================== ▲ 难度奖励生成 ====================
+
+    # ---- 构建原有奖励表 ----
+    log(f"\n===== 生成奖励表 =====")
+    all_reward_tables = {}
+
+    # 合并原有 REWARD_TABLES
+    if hasattr(cfg, 'REWARD_TABLES') and cfg.REWARD_TABLES:
+        for key, spec in cfg.REWARD_TABLES.items():
+            tid, snbt = build_reward_table_snbt(key, item_ids)
+            all_reward_tables[tid] = snbt
+            log(f"  [奖励表] {key} -> {tid[:16]}...")
+
+    # 合并难度奖励表
+    all_reward_tables.update(difficulty_tables)
+    log(f"  [总计] 共 {len(all_reward_tables)} 张奖励表")
+
+    # ---- 输出文件 ----
+    output_dir = getattr(cfg, "OUTPUT_DIR", "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 写出 reward_tables.snbt
+    rt_path = os.path.join(output_dir, "reward_tables.snbt")
+    with open(rt_path, "w", encoding="utf-8") as f:
+        for tid, snbt in all_reward_tables.items():
+            f.write(snbt + "\n\n")
+    log(f"  [写出] 奖励表 -> {rt_path}")
+
+    # 写出任务 JSON（带 reward_table_id）
+    quests_out = []
+    for q in all_quests:
+        q_out = {
+            "key": q["key"],
+            "type": q["type"],
+            "title": q["title"],
+            "desc": q["desc"],
+            "dependencies": q["dependencies"],
+        }
+        if q.get("id"):
+            q_out["id"] = q["id"]
+        if q.get("count"):
+            q_out["count"] = q["count"]
+        if q.get("reward_table_id"):
+            q_out["reward_table"] = q["reward_table_id"]
+        quests_out.append(q_out)
+
+    q_path = os.path.join(output_dir, "quests.json")
+    with open(q_path, "w", encoding="utf-8") as f:
+        json.dump(quests_out, f, ensure_ascii=False, indent=2)
+    log(f"  [写出] 任务 -> {q_path} ({len(quests_out)} 个)")
+
+    # ---- 清理 ----
+    _save_mcmod_cache()
+    log(f"\n===== 完成 =====")
+    log(f"[统计] 总任务 {len(all_quests)} 个 | 奖励表 {len(all_reward_tables)} 张")
+    close_log()
 
 
 if __name__ == "__main__":
