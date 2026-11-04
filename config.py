@@ -1,90 +1,94 @@
 # -*- coding: utf-8 -*-
 """
 ========================================================
-config.py —— ftb-bate 配置文件（白板模板）
+config.py —— ftb-bate 配置文件（IdDumper 模组适配版 · 白板）
 ========================================================
-只需改这个文件，main.py 不用动。
-使用前请把下面所有 【TODO】 处填好。
-========================================================
-支持任务类型：item / checkmark / structure / kill
-MC百科：仅作【模组级攻略补充】，不查具体物品
-章节图标：自动校验，不在 items.json 则回退到 minecraft:book
-整合包介绍：自动生成一个独立章节，放在所有章节组之前
-奖励系统：支持基于任务难度的动态奖励（默认开启）
+只需改这个文件，主程序不用动。
+数据文件直接读取 IdDumper 模组导出的 JSON。
+
+【白板说明】
+- 所有需要你填写的值都留空或保持占位。
+- 带 【TODO】 的项必须按你的整合包填写。
+- 带 【可选】 的项不填也能跑，但建议按需配置。
 ========================================================
 """
 import os
 
 # ==================== 路径 ====================
-# 【TODO】改成你放 4 个数据文件 + 脚本的目录
-BASE_DIR = "/storage/emulated/0/Download/py"
+# 【TODO】改成你导出文件所在的目录
+# 手机示例："/storage/emulated/0/Download/py/dumpids"
+# PC 示例：  r"D:\mc\dumpids"
+BASE_DIR = ""
 
-MODLIST_FILE   = os.path.join(BASE_DIR, "modlist.txt")
-ITEMS_FILE     = os.path.join(BASE_DIR, "items.json")
-STRUCTURE_FILE = os.path.join(BASE_DIR, "structure_dump.txt")
-ENTITIES_FILE  = os.path.join(BASE_DIR, "entities_list.json")
+MODLIST_FILE      = os.path.join(BASE_DIR, "modlist.json")
+ITEMS_FILE        = os.path.join(BASE_DIR, "items.json")
+STRUCTURES_FILE   = os.path.join(BASE_DIR, "structures.json")
+ENTITIES_FILE     = os.path.join(BASE_DIR, "entities.json")
 
 OUTPUT_DIR          = os.path.join(BASE_DIR, "output")
 CHAPTERS_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "chapters")
 REWARDS_OUTPUT_DIR  = os.path.join(OUTPUT_DIR, "reward_tables")
 
+# 【可选】日志文件路径，留空则用 "logs/ftb_bate.log"
+LOG_FILE = os.path.join(BASE_DIR, "logs", "ftb_bate.log")
+
 
 # ==================== API ====================
-# Key 只从环境变量读取，禁止写死在代码里
-API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+# 【TODO】填入你的 API Key，或通过环境变量 DEEPSEEK_API_KEY 提供
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
-# 默认 DeepSeek；想换 OpenAI 兼容端点或 Ollama 就改这两个环境变量
-# 官方模型名：deepseek-chat / deepseek-reasoner
 BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
 MODEL    = os.environ.get("LLM_MODEL", "deepseek-chat")
 
 
+# ==================== 随机种子 ====================
+# 【可选】固定整数可复现生成结果；None 表示每次随机
+RANDOM_SEED = None
+
+
 # ==================== MC 百科补充（模组级攻略） ====================
-# 注意：MC 百科只做【模组级】攻略补充，不查具体物品 ID。
-# 查询时用 modlist.txt 里的模组中文名 + ID 后半段拼接，命中模组页或攻略页。
 ENABLE_MCMOD_LOOKUP = True
 MCMOD_API_BASE      = "https://search.mcmod.cn/s"
 MCMOD_TIMEOUT       = 10
 MCMOD_MAX_LOOKUP    = 8
 MCMOD_CACHE_FILE    = os.path.join(BASE_DIR, "mcmod_cache.json")
 
-# modlist.txt 找不到时的后备映射
-# 【TODO】按整合包补充
+# 【TODO】modid -> 模组中文名，提升 MC百科 查询命中率
 MCMOD_KEYWORD_MAP = {
     # "example_modid": "模组中文名",
 }
 
 
 # ==================== 语言 ====================
+# "zh" 或 "en"
 QUEST_LANGUAGE = "zh"
 
 
 # ==================== 模组 ID 前缀 ====================
-# 【TODO】按整合包补充。章节前缀与奖励池会引用这里的键
+# 【可选】自定义 modid 别名表，主程序当前未强制使用
 MOD = {
     # "example": "example_modid",
 }
 
 
 # ==================== 任务书整体介绍 ====================
-# 会写进每次提示词开头，告诉 AI 这个整合包是什么
-# 【TODO】改成你的整合包简介（一两句话讲清主题）
 PACK_INTRO = (
-    "这是一个 Minecraft 整合包。"
+    ""
 )
 
 
 # ==================== 整合包介绍章节 ====================
-# 自动在所有章节组之前插入一个「整合包介绍」章节
-# 章节内容由 AI 根据 PACK_INTRO + 模组列表生成，不需要手写任务
-ENABLE_PACK_INTRO_CHAPTER = True
+# 【TODO】是否生成介绍章节
+GENERATE_PACK_INTRO = True
 PACK_INTRO_CHAPTER_TITLE  = "整合包介绍"
 PACK_INTRO_CHAPTER_FOCUS  = (
     "向玩家介绍本整合包的核心主题、主要玩法、推荐游玩顺序。"
     "任务以 checkmark 为主，让玩家读完介绍后点击确认即可。"
 )
 PACK_INTRO_CHAPTER_ICON   = "minecraft:book"
-PACK_INTRO_TASK_COUNT     = 3   # 介绍章节生成多少个任务
+PACK_INTRO_TASK_COUNT     = 3
+# 介绍章节所属组的标题（group 0）
+PACK_INTRO_GROUP_TITLE    = "整合包介绍"
 
 
 # ==================== 生成规模 ====================
@@ -102,69 +106,57 @@ START_Y      = 0.0
 
 
 # ==================== 章节图标 ====================
-# 章节 icon 字段若不在 items.json 中，自动回退到此图标
-# 防止游戏内显示紫黑方块/乱码
 ICON_FALLBACK = "minecraft:book"
 
 
-# ==================== ▼ 难度奖励配置（新增） ====================
-# 是否启用基于任务难度的动态奖励
-# True  = 每个任务根据其难度自动生成专属奖励表
-# False = 使用下方 REWARD_TABLES 手写奖励表（原逻辑）
+# ==================== ▼ 难度奖励配置 ====================
 ENABLE_DIFFICULTY_REWARDS = True
 
-# 各难度等级配置
-# 系统根据任务类型/数量/依赖深度/稀有模组 综合评分 → 1~5 级
-# 每级决定：物品数量范围、权重范围、loot_size
 DIFFICULTY_TIERS = {
-    "trivial": {   # 难度 1 —— 简单任务（如 checkmark、单个常见物品）
-        "weight_range": (1, 2),        # 单个物品的权重范围
-        "item_count_range": (1, 2),    # 奖励物品种类数量范围
+    "trivial": {
+        "weight_range": (1, 2),
+        "item_count_range": (1, 2),
+        "reward_tables_ref": [],
         "description": "简单任务",
     },
-    "easy": {      # 难度 2 —— 普通任务（如收集几个普通物品）
+    "easy": {
         "weight_range": (2, 4),
         "item_count_range": (2, 4),
+        "reward_tables_ref": [],
         "description": "普通任务",
     },
-    "medium": {    # 难度 3 —— 中等任务（如击杀中等数量怪物、收集多个物品）
+    "medium": {
         "weight_range": (3, 6),
         "item_count_range": (3, 6),
+        "reward_tables_ref": [],
         "description": "中等任务",
     },
-    "hard": {      # 难度 4 —— 困难任务（如复杂结构探索、大量击杀）
+    "hard": {
         "weight_range": (5, 10),
         "item_count_range": (5, 10),
+        "reward_tables_ref": [],
         "description": "困难任务",
     },
-    "extreme": {   # 难度 5 —— 极限任务（如终局 BOSS、稀有模组收集）
+    "extreme": {
         "weight_range": (8, 16),
         "item_count_range": (8, 20),
+        "reward_tables_ref": [],
         "description": "极限任务",
     },
 }
 
-# 任务类型基础难度分（分越高 = 难度等级越高）
-# 评分公式：raw = 类型分 + count * COUNT_FACTOR + 依赖深度 * DEPTH_WEIGHT + 稀有模组加成
-# raw ≤ 1.5 → Lv1, ≤ 2.5 → Lv2, ≤ 4.0 → Lv3, ≤ 6.0 → Lv4, > 6.0 → Lv5
+# 只保留 FTB Quests 原生支持的四种任务类型
 TASK_TYPE_DIFFICULTY = {
-    "checkmark": 1,   # 点击确认类，最简单
-    "item":      2,   # 收集物品
-    "kill":      3,   # 击杀实体，更难
-    "structure": 4,   # 探索结构，最难
+    "checkmark":   1,
+    "item":        2,
+    "kill":        3,
+    "structure":   4,
 }
 
-# count 对难度的贡献系数
-# 例：kill 类型 count=10 → 贡献 10 * 0.3 = 3.0 分
 COUNT_DIFFICULTY_FACTOR = 0.3
-
-# 依赖深度权重
-# 例：某任务依赖链深度为 3 → 贡献 3 * 0.5 = 1.5 分
 DEP_DEPTH_WEIGHT = 0.5
 
-# 稀有模组前缀列表
-# 如果任务关联的物品/实体属于这些模组，额外 +1 难度分
-# 【TODO】按整合包中后期/高级模组补充
+# 【可选】稀有模组前缀，命中后难度 +1
 RARE_MOD_PREFIXES = [
     # "botania",
     # "draconicevolution",
@@ -172,8 +164,6 @@ RARE_MOD_PREFIXES = [
     # "ae2",
 ]
 
-# 难度奖励兜底物品池
-# 当物品池不足或为空时使用，确保每张奖励表都有内容
 REWARD_FALLBACK_POOL = [
     "minecraft:emerald",
     "minecraft:diamond",
@@ -184,7 +174,6 @@ REWARD_FALLBACK_POOL = [
     "minecraft:enchanted_golden_apple",
 ]
 
-# 难度奖励表命名前缀（生成的表会以此开头，便于调试）
 DIFFICULTY_TABLE_PREFIX = "diff"
 # ==================== ▲ 难度奖励配置 ====================
 
@@ -194,19 +183,20 @@ DIFFICULTY_TABLE_PREFIX = "diff"
 #
 # 每章字段:
 #   title            章节标题
-#   focus            本章主题描述（写入提示词）
-#   extra            整体要求描述（写入提示词）
+#   focus            本章主题描述
+#   extra            整体要求描述
 #   item_prefixes    物品模组前缀列表（空列表 = 使用全物品池）
 #   entity_prefixes  实体模组前缀列表（空列表 = 使用全实体池）
 #   use_structures   是否使用 structure 任务
-#   task_types       本章允许的任务类型（item / checkmark / structure / kill）
-#   icon             章节图标物品 ID（不在 items.json 时自动回退 ICON_FALLBACK）
+#   task_types       本章允许的任务类型
+#   icon             章节图标物品 ID
+#   batches          本章生成几个批次（默认 1）
 CHAPTER_GROUPS = [
     {
-        "title": "默认组",
+        "title": "",
         "chapters": [
             {
-                "title": "第一章",
+                "title": "",
                 "focus": "",
                 "extra": "",
                 "item_prefixes": [],
@@ -214,6 +204,7 @@ CHAPTER_GROUPS = [
                 "use_structures": False,
                 "task_types": ["item", "checkmark"],
                 "icon": "",
+                "batches": 1,
             },
         ],
     },
@@ -221,44 +212,13 @@ CHAPTER_GROUPS = [
 
 
 # ==================== 奖励表定义（手写后备） ====================
-# 仅当 ENABLE_DIFFICULTY_REWARDS = False 或物品池为空时使用
 REWARD_TABLES = {
-    "basic": {
-        "title": "基础奖励",
-        "entries": [
-            {"item": "minecraft:iron_ingot", "count": 4, "weight": 30},
-            {"item": "minecraft:gold_ingot", "count": 2, "weight": 20},
-            {"item": "minecraft:emerald", "count": 1, "weight": 15},
-            {"item": "minecraft:experience_bottle", "count": 2, "weight": 15},
-        ],
-    },
-    "structure": {
-        "title": "探索者宝箱",
-        "entries": [
-            {"item": "minecraft:diamond", "count": 2, "weight": 25},
-            {"item": "minecraft:emerald", "count": 4, "weight": 20},
-            {"item": "minecraft:netherite_scrap", "count": 1, "weight": 10},
-            {"item": "minecraft:enchanted_golden_apple", "count": 1, "weight": 5},
-        ],
-    },
-    "cultivation": {
-        "title": "修炼者奖励",
-        "entries": [
-            {"item": "minecraft:emerald", "count": 3, "weight": 25},
-            {"item": "minecraft:diamond", "count": 2, "weight": 20},
-            {"item": "minecraft:experience_bottle", "count": 4, "weight": 20},
-            {"item": "minecraft:gold_ingot", "count": 4, "weight": 15},
-        ],
-    },
-    "endgame": {
-        "title": "终局奖励",
-        "entries": [
-            {"item": "minecraft:netherite_ingot", "count": 1, "weight": 20},
-            {"item": "minecraft:diamond_block", "count": 1, "weight": 15},
-            {"item": "minecraft:enchanted_golden_apple", "count": 3, "weight": 10},
-            {"item": "minecraft:nether_star", "count": 1, "weight": 5},
-        ],
-    },
+    # "basic": {
+    #     "title": "",
+    #     "entries": [
+    #         {"item": "", "count": 1, "weight": 1},
+    #     ],
+    # },
 }
 
 
@@ -267,12 +227,9 @@ REWARD_AUTO_FROM_ITEMS = True
 REWARD_TABLE_SIZE = 4
 REWARD_ITEM_COUNT_RANGE = (1, 3)
 
-# 【TODO】奖励表物品池映射：table_key -> 前缀列表（空列表 = 使用全部物品）
+# 【可选】按前缀限定各奖励池，主程序当前未强制使用
 REWARD_TABLE_POOLS = {
-    "basic":       ["minecraft"],
-    "structure":   [],
-    "cultivation": [],
-    "endgame":     [],
+    # "basic": [],
 }
 
 REWARD_ITEM_BLACKLIST = [
@@ -283,6 +240,7 @@ REWARD_ITEM_BLACKLIST = [
     "minecraft:jigsaw", "minecraft:knowledge_book",
 ]
 
+# 【可选】按关键词排除奖励物品
 REWARD_ITEM_BLACKLIST_KEYWORDS = []
 
 
