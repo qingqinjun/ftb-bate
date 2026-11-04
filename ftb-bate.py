@@ -1,16 +1,28 @@
 # -*- coding: utf-8 -*-
 """
 ========================================================
-ftb-bate —— FTB Quests 任务书自动生成器（白板安全版）
+ftb-bate —— FTB Quests 任务书自动生成器（白板安全版 · SNBT 输出）
 ========================================================
 特性：
   - 所有 cfg 键通过 C() 兜底，缺键不崩
+  - 输出 FTB Quests 1.20.1 原生 .snbt 格式
+  - 先生成 data.snbt / chapter_groups.snbt，再逐章生成并写入 group 字段
   - 任务要求 tasks: [] 正确包裹
   - 奖励内嵌，无 reward_tables
   - BOSS 击杀固定 1，普通怪 3~10，描述自动对齐
-  - 连线简化：只保留有效主线，不做全量孤立补齐
   - ID 使用合法十进制 Long 字符串
   - AI 截断自动修复
+
+【防 FTB isExcludedByOtherQuestline 递归崩溃 —— 强化版】
+  - 【修复1】只保留本章内依赖，跨章节依赖直接丢弃
+  - 【修复2】介绍章同样只保留本章内依赖
+  - 【修复3】progression_mode 默认 linear，可通过 PROGRESSION_MODE 覆盖
+  - 【修复4】group 为空时不写该字段，避免归入默认组参与跨组排除
+  - 【修复5】章节组标题硬校验：空/重复直接报错
+  - 【修复6】normalize_batch 依赖过滤收紧：只保留本章内、非自环、最多1个
+  - 【修复7】坐标列数兜底 max(1, cols)
+  - 【修复8】generate_chapter 开头显式清空 quests
+  - 【修复9】生成结束后做跨章节依赖检查，发现即告警并列出
 ========================================================
 """
 import json
@@ -584,6 +596,8 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 - key 在本章内唯一，用 t1/t2/... 短名
 - {type_hint}
 - **dependencies 必须体现前置逻辑，不能全是空数组！**
+- **每个任务最多只允许有 1 个前置依赖（dependencies 数组长度 ≤ 1），不要设计分支合并结构！**
+- **dependencies 只能引用本章内的 key，禁止引用其他章节的 key！**
 - title ≤ 12 字，desc ≤ 30 字
 - **kill 类型：BOSS 类实体（名字带 boss/naga/lich/hydra/dragon 等）count 必须为 1，普通怪物 count 在 3~10 之间，描述要与 count 一致。**
 - **如果你填的 ID 不在提供的列表里，整个任务将作废！**
@@ -614,7 +628,7 @@ def build_intro_prompt():
 - 恰好 {n} 个任务，全部为 checkmark 类型
 - key 用 i1/i2/... 短名，本章内唯一
 - 第一个任务 dependencies 为空数组 []
-- 后续任务建议串联，形成介绍流程
+- 后续任务建议串联，形成介绍流程，**每个任务最多 1 个前置**
 - title ≤ 12 字，desc ≤ 30 字
 - 只输出 JSON 数组
 - **输出必须紧凑：不要换行缩进，不要多余空格，每个任务一行**
@@ -763,6 +777,12 @@ def normalize_batch(batch, already, batch_index,
             deps = [deps]
         deps = [str(d) for d in deps if isinstance(d, (str, int))]
         deps = [d for d in deps if _LEGAL_KEY_RE.match(d)]
+        # 【修复6】依赖过滤收紧：只保留本章已存在或本批前面的 key，最多 1 个，不自环
+        valid_for_this = existing_keys | {c["key"] for c in cleaned}
+        deps = [d for d in deps if d in valid_for_this and d != key]
+        if len(deps) > 1:
+            deps = deps[:1]
+
         raw_type = q.get("type")
         raw_id = _clean_str(q.get("id", ""))
         qtype, qid, count = "checkmark", "", None
@@ -811,6 +831,8 @@ def normalize_batch(batch, already, batch_index,
     valid = existing_keys | {q["key"] for q in cleaned}
     for q in cleaned:
         q["dependencies"] = [d for d in q["dependencies"] if d in valid and d != q["key"]]
+        if len(q["dependencies"]) > 1:
+            q["dependencies"] = q["dependencies"][:1]
     if cleaned and not already:
         cleaned[0]["dependencies"] = []
     return cleaned
@@ -841,16 +863,22 @@ def break_cycles(quests):
     return removed[0]
 
 
-# ==================== 简化的智能连线兜底 ====================
+# ==================== 【修复8】严格链式重写 ====================
 def fix_chain_dependencies(quests):
-    """只给没有依赖的任务补上前一个任务，不强行串联所有孤立节点。"""
+    """【修复8】严格链式：每个任务只依赖它前一个任务。
+
+    彻底消灭分支合并结构，这是 FTB Quests 的
+    TeamData.isExcludedByOtherQuestline ↔ Quest.isQuestObjectExcluded
+    递归崩溃的根因之一。不再信任 AI 返回的 dependencies。
+    """
     if not quests:
         return
-    for i in range(1, len(quests)):
-        q = quests[i]
-        if not q["dependencies"]:
-            q["dependencies"].append(quests[i - 1]["key"])
-            log(f"    [连线兜底] {q['key']} 无前置，连到前一任务 {quests[i - 1]['key']}")
+    for i, q in enumerate(quests):
+        if i == 0:
+            q["dependencies"] = []
+        else:
+            q["dependencies"] = [quests[i - 1]["key"]]
+    log(f"    [严格链式] 已重写 {len(quests)} 个任务的依赖为纯链式")
 
 
 # ==================== 奖励与难度挂钩（内嵌） ====================
@@ -939,278 +967,509 @@ def attach_difficulty_rewards(quests, item_pool):
     for q in quests:
         diff = calc_task_difficulty(q, quests)
         tier = _tier_for_difficulty(diff)
-        item_id, count = _select_reward_items_for_tier(tier, item_pool, fallback_pool)
+        item_id, cnt = _select_reward_items_for_tier(tier, item_pool, fallback_pool)
         q["reward_item"] = item_id
-        q["reward_count"] = count
-    log(f"[内嵌奖励] 分配完成。")
-
-
-# ==================== 数据包输出辅助 ====================
-def _calc_layout(quests, cols_per_row, col_spacing, row_spacing, start_x, start_y):
-    for i, q in enumerate(quests):
-        row = i // cols_per_row
-        col = i % cols_per_row
-        q["x"] = start_x + col * col_spacing
-        q["y"] = start_y - row * row_spacing
+        q["reward_count"] = cnt
+        q["difficulty"] = diff
+    log(f"[内嵌奖励] 完成，已为 {len(quests)} 个任务分配奖励")
     return quests
 
 
-def _quest_to_snbt(q, key_to_uuid):
-    quest_id = q.get("_uuid") or ID_POOL.new()
-    q["_uuid"] = quest_id
-    snbt = f'{{\n'
-    snbt += f'    id: "{quest_id}"\n'
-    snbt += f'    x: {float(q.get("x", 0)):.1f}d\n'
-    snbt += f'    y: {float(q.get("y", 0)):.1f}d\n'
-    snbt += f'    title: "{q["title"].replace(chr(34), chr(39))}"\n'
-    snbt += f'    description: ["{q["desc"].replace(chr(34), chr(39))}"]\n'
+# ==================== 任务池筛选 ====================
+def _filter_pool_by_prefix(pool, prefixes):
+    if not prefixes:
+        return list(pool)
+    out = []
+    for iid in pool:
+        if ":" not in iid:
+            continue
+        modid = iid.split(":", 1)[0]
+        if modid in prefixes:
+            out.append(iid)
+    return out
 
-    task_id = gen_hex_id()
-    if q["type"] == "item":
-        snbt += '    tasks: [{\n'
-        snbt += '        consume_items: true\n'
-        snbt += f'        count: {int(q.get("count", 1))}L\n'
-        snbt += f'        id: "{task_id}"\n'
-        snbt += f'        item: "{q["id"]}"\n'
-        snbt += '        type: "item"\n'
-        snbt += '    }]\n'
-    elif q["type"] == "kill":
-        snbt += '    tasks: [{\n'
-        snbt += f'        count: {int(q.get("count", 1))}L\n'
-        snbt += f'        entity: "{q["id"]}"\n'
-        snbt += f'        id: "{task_id}"\n'
-        snbt += '        type: "kill"\n'
-        snbt += '    }]\n'
-    elif q["type"] == "structure":
-        snbt += '    tasks: [{\n'
-        snbt += f'        id: "{task_id}"\n'
-        snbt += f'        structure: "{q["id"]}"\n'
-        snbt += '        type: "structure"\n'
-        snbt += '    }]\n'
-    elif q["type"] == "checkmark":
-        snbt += '    tasks: [{\n'
-        snbt += f'        id: "{task_id}"\n'
-        snbt += '        type: "checkmark"\n'
-        snbt += '    }]\n'
 
-    if q.get("dependencies"):
-        deps_str = ", ".join(
-            f'"{key_to_uuid[d]}"' for d in q["dependencies"] if d in key_to_uuid
+def _build_pools_for_chapter(ctx, items, entities, structures):
+    item_pool = _filter_pool_by_prefix(list(items.keys()), ctx["item_prefixes"])
+    if not item_pool:
+        item_pool = list(items.keys())
+    entity_pool = _filter_pool_by_prefix(list(entities.keys()), ctx["entity_prefixes"])
+    if not entity_pool:
+        entity_pool = list(entities.keys())
+    struct_pool = list(structures) if ctx["use_structures"] else []
+    return item_pool, entity_pool, struct_pool
+
+
+# ==================== 章节生成 ====================
+def generate_chapter(chapter_index, items, entities, structures,
+                     batches_per_chapter, batch_size, max_tokens):
+    ctx = chapter_context(chapter_index)
+    log(f"\n===== 第 {chapter_index + 1} 章「{ctx['title']}」=====")
+    log(f"  焦点: {ctx['focus']}")
+
+    is_intro = (ctx["group_index"] == 0 and
+                ctx["title"] == C("PACK_INTRO_CHAPTER_TITLE", "整合包介绍"))
+    if is_intro:
+        return _generate_intro_chapter(max_tokens)
+
+    item_pool, entity_pool, struct_pool = _build_pools_for_chapter(
+        ctx, items, entities, structures
+    )
+    log(f"  物品池: {len(item_pool)} 个，实体池: {len(entity_pool)} 个，结构池: {len(struct_pool)} 个")
+
+    allowed = list(ctx["task_types"])
+    quests = []   # 【修复8】显式清空，防止跨章节残留
+    for b in range(batches_per_chapter):
+        log(f"  -- 第 {b + 1}/{batches_per_chapter} 批 --")
+        mcmod_section = _build_mcmod_section(item_pool, entity_pool)
+        prompt = _prompt_zh(
+            ctx, chapter_index, b, quests,
+            item_pool, struct_pool, entity_pool,
+            allowed, batch_size, mcmod_section,
         )
-        if deps_str:
-            snbt += f'    dependencies: [{deps_str}]\n'
+        raw = call_deepseek(prompt, max_tokens=max_tokens)
+        if not raw:
+            log(f"  [批次 {b + 1}] 未获得有效任务，跳过")
+            continue
+        cleaned = normalize_batch(
+            raw, quests, b,
+            valid_structures=struct_pool,
+            valid_entities=entity_pool,
+            allowed_types=allowed,
+        )
+        log(f"  [批次 {b + 1}] 获得 {len(cleaned)} 个任务")
+        quests.extend(cleaned)
 
+    break_cycles(quests)
+    fix_chain_dependencies(quests)
+    attach_difficulty_rewards(quests, item_pool)
+    return quests
+
+
+def _generate_intro_chapter(max_tokens):
+    log("  [介绍章节] 生成 checkmark 任务...")
+    prompt = build_intro_prompt()
+    raw = call_deepseek(prompt, max_tokens=max_tokens)
+    if not raw:
+        log("  [介绍章节] 未获得任务，使用默认三条")
+        raw = [
+            {"key": "i1", "type": "checkmark", "title": "欢迎来到整合包",
+             "desc": "了解本整合包的核心玩法", "dependencies": []},
+            {"key": "i2", "type": "checkmark", "title": "核心玩法",
+             "desc": "了解修仙与长生主线", "dependencies": ["i1"]},
+            {"key": "i3", "type": "checkmark", "title": "游玩建议",
+             "desc": "按推荐顺序体验整合包", "dependencies": ["i2"]},
+        ]
+    cleaned = normalize_batch(
+        raw, [], 0, valid_structures=[], valid_entities=[],
+        allowed_types=["checkmark"],
+    )
+    # 【修复2】介绍章同样只保留本章内依赖
+    for i, q in enumerate(cleaned):
+        q["dependencies"] = [] if i == 0 else [cleaned[i - 1]["key"]]
+    for q in cleaned:
+        q["difficulty"] = 1
+        q["reward_item"] = "minecraft:book"
+        q["reward_count"] = 1
+    return cleaned
+
+
+# ==================== SNBT 序列化 ====================
+class LongInt(int):
+    """标记为 Long 的整数，序列化时加 L 后缀。"""
+    pass
+
+
+def _snbt_escape(s):
+    s = str(s)
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _snbt_str(s):
+    return f'"{_snbt_escape(s)}"'
+
+
+def _snbt_value(v, indent=1):
+    if isinstance(v, bool):
+        return "1b" if v else "0b"
+    if isinstance(v, LongInt):
+        return f"{int(v)}L"
+    if isinstance(v, int):
+        return f"{v}"
+    if isinstance(v, float):
+        return f"{v}d"
+    if isinstance(v, str):
+        return _snbt_str(v)
+    if isinstance(v, list):
+        if not v:
+            return "[]"
+        pad = "\t" * indent
+        inner = ",\n".join(pad + "\t" + _snbt_value(x, indent + 1) for x in v)
+        return "[\n" + inner + "\n" + pad + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        pad = "\t" * indent
+        lines = []
+        for k, val in v.items():
+            lines.append(f"{pad}\t{k}: {_snbt_value(val, indent + 1)}")
+        return "{\n" + "\n".join(lines) + "\n" + pad + "}"
+    return _snbt_str(v)
+
+
+# ==================== FTB Quests 章节转换 ====================
+def _to_ftb_quest_snbt(q, chapter_icon):
+    qid = ID_POOL.new()
+    tasks = []
+    if q["type"] == "item" and q["id"]:
+        tasks.append({
+            "consume_items": True,
+            "count": LongInt(int(q.get("count", 1))),
+            "id": ID_POOL.new(),
+            "item": q["id"],
+            "type": "item",
+        })
+    elif q["type"] == "kill" and q["id"]:
+        tasks.append({
+            "count": LongInt(int(q.get("count", 1))),
+            "id": ID_POOL.new(),
+            "entity": q["id"],
+            "type": "kill",
+        })
+    elif q["type"] == "structure" and q["id"]:
+        tasks.append({
+            "id": ID_POOL.new(),
+            "structure": q["id"],
+            "type": "structure",
+        })
+    else:
+        tasks.append({
+            "id": ID_POOL.new(),
+            "type": "checkmark",
+        })
+
+    rewards = []
     if q.get("reward_item"):
-        reward_id = gen_hex_id()
-        snbt += '    rewards: [{\n'
-        snbt += '        auto: "enabled"\n'
-        snbt += f'        id: "{reward_id}"\n'
-        snbt += f'        item: "{q["reward_item"]}"\n'
-        snbt += f'        count: {int(q.get("reward_count", 1))}\n'
-        snbt += '        team_reward: true\n'
-        snbt += '        type: "item"\n'
-        snbt += '    }]\n'
-    snbt += f'}}'
-    return snbt
+        rewards.append({
+            "auto": "enabled",
+            "id": ID_POOL.new(),
+            "item": q["reward_item"],
+            "count": int(q.get("reward_count", 1)),
+            "team_reward": True,
+            "type": "item",
+        })
+
+    d = {
+        "id": qid,
+        "x": 0.0,
+        "y": 0.0,
+        "title": q["title"],
+    }
+    if q.get("desc"):
+        d["description"] = [q["desc"]]
+    d["icon"] = chapter_icon or C("ICON_FALLBACK", "minecraft:book")
+    d["tasks"] = tasks
+    if rewards:
+        d["rewards"] = rewards
+    d["_key"] = q["key"]
+    return d
 
 
-def _chapter_to_snbt(ch_id, ch_title, ch_icon, quests):
-    chapter_keys = {q["key"] for q in quests}
+def _build_chapter_dict(chapter_index, quests, chapter_icon, items, group_id):
+    icon = resolve_icon(chapter_icon, set(items.keys())) if items else (chapter_icon or "")
+    chapter_id = ID_POOL.new()
+
+    ftb_quests = []
+    key_to_ftb_id = {}
     for q in quests:
-        q["dependencies"] = [d for d in q.get("dependencies", []) if d in chapter_keys]
+        fq = _to_ftb_quest_snbt(q, icon)
+        key_to_ftb_id[q["key"]] = fq["id"]
+        ftb_quests.append(fq)
 
-    key_to_uuid = {}
-    for q in quests:
-        if "_uuid" not in q:
-            q["_uuid"] = ID_POOL.new()
-        key_to_uuid[q["key"]] = q["_uuid"]
+    # 【修复1】只保留本章内依赖，彻底删掉跨章节依赖。
+    # 本章内仍按"只取第一个有效前置"裁剪，保持单前置链式。
+    # 跨章节依赖是 FTB Quests 的 isExcludedByOtherQuestline
+    # 递归崩溃的主要诱因，这里直接丢弃。
+    cross_chapter_dropped = 0
+    for q, fq in zip(quests, ftb_quests):
+        first_dep = None
+        for d in q.get("dependencies", []):
+            fid = key_to_ftb_id.get(d)
+            if fid is not None and fid != fq["id"]:
+                first_dep = fid
+                break
+            elif fid is None:
+                # key 不在本章映射里 → 跨章节依赖，丢弃
+                cross_chapter_dropped += 1
+                log(f"    [跨章节依赖] 丢弃: {q['key']} -> {d}（不在本章）")
+        if first_dep is not None:
+            fq["dependencies"] = [first_dep]
+        else:
+            fq.pop("dependencies", None)
+    if cross_chapter_dropped:
+        log(f"    [跨章节依赖] 本章共丢弃 {cross_chapter_dropped} 条")
 
-    snbt = f'{{\n'
-    snbt += f'    id: "{ch_id}"\n'
-    snbt += f'    title: "{ch_title}"\n'
-    if ch_icon:
-        snbt += f'    icon: "{ch_icon}"\n'
-    snbt += f'    default_quest_shape: "circle"\n'
+    # 【修复7】坐标列数兜底，防止 divmod 除零或坐标全重叠
+    cols = max(1, int(C("COLS_PER_ROW", 6)))
+    col_sp = float(C("COL_SPACING", 2.0))
+    row_sp = float(C("ROW_SPACING", 1.5))
+    sx = float(C("START_X", 0.0))
+    sy = float(C("START_Y", 0.0))
+    for i, fq in enumerate(ftb_quests):
+        r, c = divmod(i, cols)
+        fq["x"] = sx + c * col_sp
+        fq["y"] = sy + r * row_sp
+        fq.pop("_key", None)
 
-    snbt += '    quest_links: [\n'
-    links = []
-    seen_links = set()
-    for q in quests:
-        for dep in q["dependencies"]:
-            if dep in key_to_uuid:
-                pair = (key_to_uuid[dep], q["_uuid"])
-                if pair in seen_links:
-                    continue
-                seen_links.add(pair)
-                link_id = gen_hex_id()
-                link_snbt = '        {\n'
-                link_snbt += f'            id: "{link_id}"\n'
-                link_snbt += f'            linked_quest: "{key_to_uuid[dep]}"\n'
-                link_snbt += f'            quest: "{q["_uuid"]}"\n'
-                link_snbt += '        }'
-                links.append(link_snbt)
-    if links:
-        snbt += ",\n".join(links)
-        snbt += "\n"
-    snbt += '    ]\n'
+    ctx = chapter_context(chapter_index)
+    chapter_dict = {
+        "id": chapter_id,
+        "title": ctx["title"],
+        "icon": icon,
+        "default_quest_shape": "circle",
+        "quests": ftb_quests,
+    }
+    # 【修复4】group 为空时不写该字段，避免 FTB 归入默认组参与跨组排除
+    if group_id:
+        chapter_dict["group"] = group_id
+    return chapter_dict
 
-    snbt += f'    quests: [\n'
-    quest_strs = []
-    for q in quests:
-        q_str = _quest_to_snbt(q, key_to_uuid)
-        q_str = "\n".join("        " + line for line in q_str.splitlines())
-        quest_strs.append(q_str)
-    snbt += ",\n".join(quest_strs)
-    snbt += f'\n    ]\n'
-    snbt += f'}}'
-    return snbt
+
+def save_chapter_snbt(chapter_index, quests, chapter_icon, items, group_id, output_dir):
+    if not quests:
+        log(f"  [跳过] 第 {chapter_index + 1} 章无任务")
+        return None
+    if not group_id:
+        log(f"  [警告] 第 {chapter_index + 1} 章 group_id 为空，"
+            f"请检查 CHAPTER_GROUPS[*].title 是否填写且唯一")
+    os.makedirs(output_dir, exist_ok=True)
+    chapter_dict = _build_chapter_dict(chapter_index, quests, chapter_icon, items, group_id)
+    text = _snbt_value(chapter_dict, 0)
+    path = os.path.join(output_dir, f"chapter_{chapter_index + 1:02d}.snbt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    log(f"  [保存] {path}（{len(quests)} 个任务）")
+    return chapter_dict["id"]
+
+
+def save_chapter_groups_snbt(group_titles, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    groups = []
+    title_to_id = {}
+    seen_titles = set()
+    for title in group_titles:
+        # 【修复5】组标题硬校验：空/重复直接报错
+        if not title:
+            raise ValueError("章节组标题不能为空（检查 CHAPTER_GROUPS[*].title）")
+        if title in seen_titles:
+            raise ValueError(f"章节组标题重复: '{title}'，每个组必须唯一")
+        seen_titles.add(title)
+        gid = ID_POOL.new()
+        groups.append({"id": gid, "title": title})
+        title_to_id[title] = gid
+    data = {"chapter_groups": groups}
+    path = os.path.join(output_dir, "chapter_groups.snbt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_snbt_value(data, 0))
+    log(f"[保存] 章节组 -> {path}（{len(groups)} 个组）")
+    return title_to_id
+
+
+def save_data_snbt(output_dir, pack_title=None):
+    """生成 data.snbt 全局配置。"""
+    if pack_title is None:
+        pack_title = C("PACK_TITLE", "") or "FTB Quests"
+    os.makedirs(output_dir, exist_ok=True)
+    # 【修复3】progression_mode 默认 linear，避免 flexible 触发排除判定递归
+    progression_mode = C("PROGRESSION_MODE", "linear")
+    if progression_mode == "flexible":
+        log("[警告] PROGRESSION_MODE = flexible，会启用 FTB 排除判定逻辑，"
+            "存在 isExcludedByOtherQuestline 递归风险，建议改为 linear")
+    data = {
+        "title": pack_title,
+        "default_quest_shape": "circle",
+        "progression_mode": progression_mode,
+        "default_autoclaim_rewards": "disabled",
+        "default_consume_items": False,
+        "default_reward_team": True,
+        "detection_delay": 10,
+        "drop_loot_crates": False,
+        "fallback_locale": "",
+        "grid_scale": 0.5,
+        "pause_game": False,
+        "show_lock_icons": True,
+        "exclusion_enabled": False,   # 【保险】若该版本支持，直接关闭排除判定
+    }
+    path = os.path.join(output_dir, "data.snbt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_snbt_value(data, 0))
+    log(f"[保存] 全局配置 -> {path}（progression_mode={progression_mode}）")
+
+
+# ==================== 【修复9】跨章节依赖检查 ====================
+def check_cross_chapter_dependencies(output_dir):
+    """生成结束后，扫描所有 chapter_*.snbt，检查依赖 ID 是否跨章节。
+
+    每个 chapter 文件的 quests 里，每个 quest 有 id: <数字>
+    和 dependencies: [<数字>, ...]。
+    我们收集所有章节的 quest id，然后检查每个 quest 的 dependencies
+    是否都属于同一章节。如果某个依赖 id 属于另一个章节，就是跨章节依赖。
+    """
+    chapter_files = sorted(
+        f for f in os.listdir(output_dir)
+        if f.startswith("chapter_") and f.endswith(".snbt")
+    )
+    if not chapter_files:
+        log("[跨章节检查] 未找到 chapter_*.snbt，跳过")
+        return 0
+
+    # 1. 解析每个章节文件的 quest id 集合
+    chapter_quest_ids = {}   # file -> set(quest_id_str)
+    chapter_deps = {}        # file -> list[(quest_id, [dep_id, ...])]
+    for fname in chapter_files:
+        path = os.path.join(output_dir, fname)
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        # 抓所有 id: "数字" 或 id: 数字
+        ids = set(re.findall(r'^\s*id:\s*"?(\d+)"?', text, re.M))
+        # 只保留 quest 级别的 id（每个 quest 的 id 字段紧跟 title）
+        # 更稳妥：抓每个 quest 块
+        quest_blocks = re.findall(
+            r'\{\s*id:\s*"?(\d+)"?,.*?tasks:', text, re.S
+        )
+        chapter_quest_ids[fname] = set(quest_blocks) if quest_blocks else ids
+        # 抓 dependencies: [ "id1", "id2" ]
+        deps = []
+        for m in re.finditer(
+            r'\{\s*id:\s*"?(\d+)"?,.*?dependencies:\s*\[(.*?)\]',
+            text, re.S
+        ):
+            qid = m.group(1)
+            dep_ids = re.findall(r'"(\d+)"', m.group(2))
+            deps.append((qid, dep_ids))
+        chapter_deps[fname] = deps
+
+    # 2. 建立全局 id -> chapter 映射
+    id_to_chapter = {}
+    for fname, ids in chapter_quest_ids.items():
+        for iid in ids:
+            if iid in id_to_chapter:
+                log(f"[跨章节检查] 警告: id {iid} 同时出现在 "
+                    f"{id_to_chapter[iid]} 和 {fname}（ID 冲突）")
+            id_to_chapter[iid] = fname
+
+    # 3. 检查每个依赖是否属于同一章节
+    cross_count = 0
+    for fname, deps in chapter_deps.items():
+        for qid, dep_ids in deps:
+            for dep_id in dep_ids:
+                owner = id_to_chapter.get(dep_id)
+                if owner is None:
+                    log(f"[跨章节检查] 警告: {fname} 中 quest {qid} "
+                        f"依赖了不存在的 id {dep_id}")
+                    cross_count += 1
+                elif owner != fname:
+                    log(f"[跨章节检查] ✗ 跨章节依赖: "
+                        f"{fname} 中 quest {qid} -> {dep_id} "
+                        f"（属于 {owner}）")
+                    cross_count += 1
+
+    if cross_count:
+        log(f"\n[跨章节检查] 发现 {cross_count} 条跨章节/无效依赖！")
+        log("[跨章节检查] 这些依赖可能触发 FTB 排除判定递归，请检查生成逻辑。")
+    else:
+        log(f"\n[跨章节检查] ✓ 全部 {len(chapter_files)} 个章节文件，"
+            f"未发现跨章节依赖。")
+    return cross_count
 
 
 # ==================== 主流程 ====================
 def main():
-    batches_per_chapter, batch_size, max_tokens = ask_generation_options()
-    random.seed(C("RANDOM_SEED", None))
-    if C("RANDOM_SEED", None) is not None:
-        log(f"[随机] 已设置随机种子: {C('RANDOM_SEED')}")
-    init_log(C("LOG_FILE", "logs/ftb_bate.log"))
-    log(f"===== FTB Quests 任务书生成器启动 =====")
-    log(f"[时间] {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    log(f"[规模] 每章 {batches_per_chapter} 批 × 每批 {batch_size} 个")
-    log(f"[tokens] max_tokens = {max_tokens}")
-
-    items_path = C("ITEMS_FILE", "dumpids/items.json")
-    structs_path = C("STRUCTURES_FILE", "dumpids/structures.json")
-    modlist_path = C("MODLIST_FILE", "dumpids/modlist.json")
-    entities_path = C("ENTITIES_FILE", "dumpids/entities.json")
+    log_path = C("LOG_FILE", "")
+    init_log(log_path)
+    log("=" * 60)
+    log("FTB Quests 任务书自动生成器 启动")
+    log("=" * 60)
 
     _load_mcmod_cache()
+
+    items = load_items(C("ITEMS_FILE", ""))
+    entities = load_entities(C("ENTITIES_FILE", ""))
+    structures = load_structures(C("STRUCTURES_FILE", ""))
+    modlist = load_modlist(C("MODLIST_FILE", ""))
+
     global _modlist_map
-    _modlist_map = load_modlist(modlist_path)
-    item_names = load_items(items_path)
-    item_ids = list(item_names.keys())
-    structures = load_structures(structs_path)
-    entity_ids = list(load_entities(entities_path).keys())
-    log(f"[汇总] 物品 {len(item_ids)} | 结构 {len(structures)} | 实体 {len(entity_ids)} | 模组 {len(_modlist_map)}")
+    _modlist_map = modlist
 
-    output_dir = C("OUTPUT_DIR", "output")
-    chapters_dir = os.path.join(output_dir, "chapters")
-    os.makedirs(chapters_dir, exist_ok=True)
+    if not items:
+        log("[错误] items.json 为空，无法生成 item 任务，退出")
+        close_log()
+        return
 
-    all_quests = []
-    groups_dict = {}
-
-    # ---- 整合包介绍章节 ----
-    intro_ch_id = None
-    if C("GENERATE_PACK_INTRO", True):
-        log("\n===== 生成整合包介绍章节 =====")
-        intro_prompt = build_intro_prompt()
-        batch = []
-        for attempt in range(2):
-            batch = call_deepseek(intro_prompt, max_tokens=max_tokens)
-            if batch:
-                break
-            log("  [重试] 整合包介绍章节生成失败，重试...")
-        if batch:
-            intro_quests = normalize_batch(batch, [], 0, valid_structures=set(structures), valid_entities=set(entity_ids), allowed_types=["checkmark"])
-            for i, q in enumerate(intro_quests):
-                q["dependencies"] = [] if i == 0 else [intro_quests[i - 1]["key"]]
-            _calc_layout(intro_quests, C("COLS_PER_ROW", 5), C("COL_SPACING", 2.0), C("ROW_SPACING", 2.0), C("START_X", 0.0), C("START_Y", 0.0))
-            attach_difficulty_rewards(intro_quests, item_ids)
-            intro_ch_id = ID_POOL.new()
-            intro_icon = resolve_icon(C("PACK_INTRO_CHAPTER_ICON", "minecraft:book"), set(item_ids))
-            intro_ch_snbt = _chapter_to_snbt(intro_ch_id, C("PACK_INTRO_CHAPTER_TITLE", "整合包介绍"), intro_icon, intro_quests)
-            with open(os.path.join(chapters_dir, "intro.snbt"), "w", encoding="utf-8") as f:
-                f.write(intro_ch_snbt)
-            all_quests.extend(intro_quests)
-            groups_dict.setdefault(0, []).append(intro_ch_id)
-            log(f"  [完成] 整合包介绍章节: {len(intro_quests)} 个任务")
-
-    # ---- 逐章生成 ----
-    flat = cfg.flatten_chapters()
-    log(f"\n===== 共 {len(flat)} 个章节，开始生成 =====")
-    for ci, ch in enumerate(flat):
-        log(f"\n----- 第 {ci+1}/{len(flat)} 章: {ch['title']} -----")
-        ctx = chapter_context(ci)
-        chapter_quests = []
-        for bi in range(batches_per_chapter):
-            log(f"  [批次 {bi+1}/{batches_per_chapter}]")
-            prompt = _prompt_zh(
-                ctx, ci, bi, chapter_quests,
-                item_ids, structures, entity_ids,
-                ctx["task_types"],
-                batch_size,
-                _build_mcmod_section(item_ids, entity_ids),
-            )
-            batch = call_deepseek(prompt, max_tokens=max_tokens)
-            if not batch:
-                log(f"    [跳过] 批次 {bi+1} 生成失败")
-                continue
-            cleaned = normalize_batch(
-                batch, chapter_quests, bi,
-                valid_structures=set(structures),
-                valid_entities=set(entity_ids),
-                allowed_types=ctx["task_types"],
-            )
-            if not chapter_quests and cleaned:
-                cleaned[0]["dependencies"] = []
-            chapter_quests.extend(cleaned)
-            log(f"    [完成] 本批次 {len(cleaned)} 个任务，本章累计 {len(chapter_quests)} 个")
-        if chapter_quests:
-            fix_chain_dependencies(chapter_quests)
-            n_fixed = break_cycles(chapter_quests)
-            if n_fixed:
-                log(f"    [循环修复] 断开了 {n_fixed} 个循环依赖")
-            attach_difficulty_rewards(chapter_quests, item_ids)
-            _calc_layout(chapter_quests, C("COLS_PER_ROW", 6), C("COL_SPACING", 2.0), C("ROW_SPACING", 1.5), C("START_X", 0.0), C("START_Y", 0.0))
-            ch_id = ID_POOL.new()
-            ch_icon = resolve_icon(ctx.get("icon", ""), set(item_ids))
-            ch_snbt = _chapter_to_snbt(ch_id, ch['title'], ch_icon, chapter_quests)
-            fname = f"chapter_{ci+1:02d}.snbt"
-            with open(os.path.join(chapters_dir, fname), "w", encoding="utf-8") as f:
-                f.write(ch_snbt)
-            groups_dict.setdefault(ctx["group_index"] + 1, []).append(ch_id)
-        all_quests.extend(chapter_quests)
-
-    # ---- 全局循环检测 ----
-    log(f"\n===== 全局循环检测 =====")
-    total_fixed = break_cycles(all_quests)
-    if total_fixed:
-        log(f"  [全局循环修复] 断开了 {total_fixed} 个循环依赖")
+    batches_per_chapter = int(C("DEFAULT_BATCHES_PER_CHAPTER", 3))
+    batch_size = int(C("BATCH_SIZE", 6))
+    max_tokens = int(C("MAX_TOKENS", 8000))
+    if sys.stdin.isatty():
+        try:
+            batches_per_chapter, batch_size, max_tokens = ask_generation_options()
+        except Exception:
+            pass
     else:
-        log(f"  [全局循环检测] 无循环依赖 ✓")
+        log(f"[非交互] 使用默认规模: {batches_per_chapter} 批 × {batch_size} 个，max_tokens={max_tokens}")
 
-    # ---- 输出 chapter_groups.snbt ----
-    group_snbt = "{\n    chapter_groups: [\n"
-    sorted_groups = sorted(groups_dict.keys())
-    group_blocks = []
-    for g_idx in sorted_groups:
-        if g_idx == 0:
-            g_title = C("PACK_INTRO_GROUP_TITLE", "整合包介绍")
-        else:
-            g_title = f"第 {g_idx} 阶段"
-        block = "        {\n"
-        block += f'            id: "{ID_POOL.new()}"\n'
-        block += f'            title: "{g_title}"\n'
-        block += '            chapters: [\n'
-        for ch_id in groups_dict[g_idx]:
-            block += f'                "{ch_id}"\n'
-        block += '            ]\n'
-        block += '        }'
-        group_blocks.append(block)
-    group_snbt += ",\n".join(group_blocks)
-    group_snbt += "\n    ]\n}\n"
-    with open(os.path.join(output_dir, "chapter_groups.snbt"), "w", encoding="utf-8") as f:
-        f.write(group_snbt)
+    seed = C("RANDOM_SEED", None)
+    if seed is not None:
+        random.seed(seed)
+        log(f"[随机种子] {seed}")
 
-    # ---- 输出 data.snbt ----
-    data_snbt = '{\n    version: 1\n    title: "整合包任务"\n    icon: "minecraft:book"\n    default_quest_shape: "circle"\n    default_hide_dependency_lines: false\n}\n'
-    with open(os.path.join(output_dir, "data.snbt"), "w", encoding="utf-8") as f:
-        f.write(data_snbt)
+    chapters_output = C("CHAPTERS_OUTPUT_DIR", os.path.join(C("OUTPUT_DIR", "output"), "chapters"))
+    os.makedirs(chapters_output, exist_ok=True)
+
+    # 先生成全局配置与章节组
+    save_data_snbt(chapters_output)
+    group_titles = [g.get("title", "") for g in C("CHAPTER_GROUPS", [])]
+    title_to_group_id = save_chapter_groups_snbt(group_titles, chapters_output)
+
+    flat = cfg.flatten_chapters()
+    total = len(flat)
+    log(f"[章节] 共 {total} 章待生成")
+
+    success = 0
+    for idx, ch in enumerate(flat):
+        ctx = chapter_context(idx)
+        group_title = group_titles[ctx["group_index"]] if ctx["group_index"] < len(group_titles) else ""
+        group_id = title_to_group_id.get(group_title, "")
+        try:
+            quests = generate_chapter(
+                idx, items, entities, structures,
+                batches_per_chapter, batch_size, max_tokens,
+            )
+        except Exception as e:
+            log(f"[错误] 第 {idx + 1} 章生成异常: {e}")
+            continue
+        cid = save_chapter_snbt(
+            idx, quests, ctx["icon"], items, group_id, chapters_output
+        )
+        if cid:
+            success += 1
+        time.sleep(0.3)
 
     _save_mcmod_cache()
-    log(f"\n===== 完成 =====")
-    log(f"[统计] 总任务 {len(all_quests)} 个")
-    log(f"[输出] 请去 {output_dir} 查看，所有奖励都在任务文件里，quest_links 会画出连线。")
+
+    # 【修复9】生成后做跨章节依赖检查
+    log("\n" + "=" * 60)
+    log("[跨章节检查] 开始扫描生成的 SNBT 文件...")
+    cross = check_cross_chapter_dependencies(chapters_output)
+    log("=" * 60)
+
+    log("\n" + "=" * 60)
+    log(f"生成结束：成功 {success}/{total} 章")
+    log(f"输出目录: {chapters_output}")
+    if cross:
+        log(f"跨章节依赖: {cross} 条（请检查上方日志）")
+    else:
+        log("跨章节依赖: 0 条（安全）")
+    log("=" * 60)
     close_log()
 
 
