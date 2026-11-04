@@ -13,16 +13,27 @@ ftb-bate —— FTB Quests 任务书自动生成器（白板安全版 · SNBT �
   - ID 使用合法十进制 Long 字符串
   - AI 截断自动修复
 
+【依赖策略 —— 精简版】
+  - 【精简1】不再强制全链式，改为按阈值精简依赖
+  - 【精简2】依赖数 > DEPENDENCY_KEEP_THRESHOLD 的任务清空依赖
+  - 【精简3】DEPENDENCY_FORCE_KEEP_KEYS 中的关键任务保留依赖
+  - 【精简4】任何任务最多保留 1 个前置，避免分支合并
+  - 【精简5】break_cycles 先于 slim_dependencies 执行
+
 【防 FTB isExcludedByOtherQuestline 递归崩溃 —— 强化版】
   - 【修复1】只保留本章内依赖，跨章节依赖直接丢弃
   - 【修复2】介绍章同样只保留本章内依赖
-  - 【修复3】progression_mode 默认 linear，可通过 PROGRESSION_MODE 覆盖
-  - 【修复4】group 为空时不写该字段，避免归入默认组参与跨组排除
+  - 【修复3】progression_mode 默认 linear
+  - 【修复4】group 为空时不写该字段
   - 【修复5】章节组标题硬校验：空/重复直接报错
-  - 【修复6】normalize_batch 依赖过滤收紧：只保留本章内、非自环、最多1个
+  - 【修复6】normalize_batch 依赖过滤收紧
   - 【修复7】坐标列数兜底 max(1, cols)
   - 【修复8】generate_chapter 开头显式清空 quests
-  - 【修复9】生成结束后做跨章节依赖检查，发现即告警并列出
+  - 【修复9】生成后跨章节依赖检查
+  - 【修复10】_build_chapter_dict 内 FTB ID 层面 DFS 环检测 + 断环
+  - 【修复11】break_cycles 先于依赖精简执行
+  - 【修复12】生成后本章内环检测
+  - 【修复13】生成后依赖繁简检查
 ========================================================
 """
 import json
@@ -540,14 +551,14 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
     if not already:
         chain_hint = (
             "这是本章第一批任务。第一个任务的 dependencies 必须为空数组 []，它作为本章根节点。"
-            "**注意：从第二个任务开始，必须使用 dependencies 形成剧情链，不能全空。**"
-            "例如：t2 依赖 t1，t3 依赖 t2。"
+            "**后续任务可以使用 dependencies 形成少量关键解锁链，但不要把所有任务串成一条长链。**"
+            "例如：允许 t1(击杀娜迦) <- t2(击杀巫妖王) 这样的 Boss 解锁，但不要让每个任务都依赖前一个。"
         )
     else:
         chain_hint = (
-            "这是后续批次。**务必使用 dependencies 形成剧情链！**"
-            "例如：如果已有任务是'击杀娜迦'，新任务是'击杀巫妖王'，那么'击杀巫妖王'的 dependencies 必须包含'击杀娜迦'的 key。"
-            "请根据你对 Minecraft 模组的了解，设计出有先后顺序、有逻辑关联的任务树。"
+            "这是后续批次。**只对少量关键任务使用 dependencies 形成解锁链，不要把所有任务串起来。**"
+            "例如：如果已有任务是'击杀娜迦'，可以设计'击杀巫妖王'依赖它；但普通收集/探索任务应保持独立（dependencies 为空）。"
+            "请控制依赖数量，让大部分任务可以独立完成。"
         )
     type_lines = []
     if "item" in allowed:
@@ -568,7 +579,7 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 
 【本章焦点】{ctx["focus"]}
 【整体要求】{ctx["extra"]}
-【串联要求】{chain_hint}
+【依赖策略】{chain_hint}
 
 【已有任务 key 列表】（dependencies 只能从这里选，或选本批前面任务的 key）：
 {json.dumps(prev_keys, ensure_ascii=False)}
@@ -595,9 +606,10 @@ def _prompt_zh(ctx, chapter_index, batch_index, already, item_pool, struct_pool,
 - 每批恰好 {batch_size} 个任务
 - key 在本章内唯一，用 t1/t2/... 短名
 - {type_hint}
-- **dependencies 必须体现前置逻辑，不能全是空数组！**
+- **大部分任务的 dependencies 应为空数组 []，只对少量关键任务设置前置依赖**
 - **每个任务最多只允许有 1 个前置依赖（dependencies 数组长度 ≤ 1），不要设计分支合并结构！**
 - **dependencies 只能引用本章内的 key，禁止引用其他章节的 key！**
+- **禁止形成循环依赖（A 依赖 B，B 又依赖 A）！**
 - title ≤ 12 字，desc ≤ 30 字
 - **kill 类型：BOSS 类实体（名字带 boss/naga/lich/hydra/dragon 等）count 必须为 1，普通怪物 count 在 3~10 之间，描述要与 count 一致。**
 - **如果你填的 ID 不在提供的列表里，整个任务将作废！**
@@ -621,14 +633,15 @@ def build_intro_prompt():
 【输出格式】严格输出 JSON 数组，不要 Markdown 代码块：
 [
   {{"key": "i1", "type": "checkmark", "title": "欢迎来到整合包", "desc": "了解本整合包的核心玩法", "dependencies": []}},
-  {{"key": "i2", "type": "checkmark", "title": "核心玩法", "desc": "了解主要模组", "dependencies": ["i1"]}}
+  {{"key": "i2", "type": "checkmark", "title": "核心玩法", "desc": "了解主要模组", "dependencies": []}}
 ]
 
 规则：
 - 恰好 {n} 个任务，全部为 checkmark 类型
 - key 用 i1/i2/... 短名，本章内唯一
-- 第一个任务 dependencies 为空数组 []
-- 后续任务建议串联，形成介绍流程，**每个任务最多 1 个前置**
+- **大部分任务 dependencies 为空数组 []，介绍章不需要全部串联**
+- **每个任务最多 1 个前置**
+- **禁止形成循环依赖**
 - title ≤ 12 字，desc ≤ 30 字
 - 只输出 JSON 数组
 - **输出必须紧凑：不要换行缩进，不要多余空格，每个任务一行**
@@ -840,6 +853,10 @@ def normalize_batch(batch, already, batch_index,
 
 # ==================== 依赖循环检测 ====================
 def break_cycles(quests):
+    """在 quests 的 key 层面断开环。
+
+    【修复11】必须在 slim_dependencies 之前调用。
+    """
     graph = {q["key"]: list(q["dependencies"]) for q in quests}
     color = {k: 0 for k in graph}
     removed = [0]
@@ -852,7 +869,8 @@ def break_cycles(quests):
                 removed[0] += 1
                 log(f"    [循环] 断开依赖: {node} -> {dep}")
             elif c == 0:
-                dfs(dep)
+                if dep in graph:
+                    dfs(dep)
         color[node] = 2
     for k in list(graph):
         if color[k] == 0:
@@ -863,22 +881,47 @@ def break_cycles(quests):
     return removed[0]
 
 
-# ==================== 【修复8】严格链式重写 ====================
-def fix_chain_dependencies(quests):
-    """【修复8】严格链式：每个任务只依赖它前一个任务。
+# ==================== 依赖精简（替代原 fix_chain_dependencies） ====================
+def slim_dependencies(quests, keep_threshold=None, force_keep_keys=None):
+    """按规则精简依赖，而不是强制全链式。
 
-    彻底消灭分支合并结构，这是 FTB Quests 的
-    TeamData.isExcludedByOtherQuestline ↔ Quest.isQuestObjectExcluded
-    递归崩溃的根因之一。不再信任 AI 返回的 dependencies。
+    规则：
+      1. 依赖数量 > keep_threshold 的任务，清空其依赖（视为独立任务）
+      2. 依赖数量 <= keep_threshold 的任务，保留其依赖（视为关键剧情锁）
+      3. force_keep_keys 中的任务，无论依赖多少都保留（用于 Boss 解锁链等）
+      4. 最终统一做一次环检测断环（调用方已提前 break_cycles）
+
+    keep_threshold 默认取 config 的 DEPENDENCY_KEEP_THRESHOLD，缺省 1。
     """
     if not quests:
-        return
-    for i, q in enumerate(quests):
-        if i == 0:
+        return 0
+
+    if keep_threshold is None:
+        keep_threshold = int(C("DEPENDENCY_KEEP_THRESHOLD", 1))
+    force_keep_keys = set(force_keep_keys or C("DEPENDENCY_FORCE_KEEP_KEYS", []))
+
+    removed = 0
+    for q in quests:
+        deps = q.get("dependencies", [])
+        if not deps:
+            continue
+        if q["key"] in force_keep_keys:
+            # 关键任务：保留依赖，但最多保留 1 个，避免分支合并
+            if len(deps) > 1:
+                q["dependencies"] = deps[:1]
+                removed += len(deps) - 1
+            continue
+        if len(deps) > keep_threshold:
+            removed += len(deps)
             q["dependencies"] = []
-        else:
-            q["dependencies"] = [quests[i - 1]["key"]]
-    log(f"    [严格链式] 已重写 {len(quests)} 个任务的依赖为纯链式")
+        elif len(deps) > 1:
+            # 未超阈值但有多依赖，也只保留第一个，避免分支合并崩溃
+            removed += len(deps) - 1
+            q["dependencies"] = deps[:1]
+
+    log(f"    [依赖精简] 共移除 {removed} 条冗余依赖，"
+        f"阈值={keep_threshold}，强制保留 {len(force_keep_keys)} 个关键任务")
+    return removed
 
 
 # ==================== 奖励与难度挂钩（内嵌） ====================
@@ -1040,8 +1083,9 @@ def generate_chapter(chapter_index, items, entities, structures,
         log(f"  [批次 {b + 1}] 获得 {len(cleaned)} 个任务")
         quests.extend(cleaned)
 
+    # 【修复11】先 break_cycles 处理 AI 原始环，再依赖精简
     break_cycles(quests)
-    fix_chain_dependencies(quests)
+    slim_dependencies(quests)
     attach_difficulty_rewards(quests, item_pool)
     return quests
 
@@ -1056,17 +1100,16 @@ def _generate_intro_chapter(max_tokens):
             {"key": "i1", "type": "checkmark", "title": "欢迎来到整合包",
              "desc": "了解本整合包的核心玩法", "dependencies": []},
             {"key": "i2", "type": "checkmark", "title": "核心玩法",
-             "desc": "了解修仙与长生主线", "dependencies": ["i1"]},
+             "desc": "了解修仙与长生主线", "dependencies": []},
             {"key": "i3", "type": "checkmark", "title": "游玩建议",
-             "desc": "按推荐顺序体验整合包", "dependencies": ["i2"]},
+             "desc": "按推荐顺序体验整合包", "dependencies": []},
         ]
     cleaned = normalize_batch(
         raw, [], 0, valid_structures=[], valid_entities=[],
         allowed_types=["checkmark"],
     )
-    # 【修复2】介绍章同样只保留本章内依赖
-    for i, q in enumerate(cleaned):
-        q["dependencies"] = [] if i == 0 else [cleaned[i - 1]["key"]]
+    # 【修复2】介绍章同样走精简逻辑，避免全部串联
+    slim_dependencies(cleaned, keep_threshold=1)
     for q in cleaned:
         q["difficulty"] = 1
         q["reward_item"] = "minecraft:book"
@@ -1186,30 +1229,70 @@ def _build_chapter_dict(chapter_index, quests, chapter_icon, items, group_id):
         key_to_ftb_id[q["key"]] = fq["id"]
         ftb_quests.append(fq)
 
+    id_to_quest_key = {fq["id"]: q["key"] for q, fq in zip(quests, ftb_quests)}
+
     # 【修复1】只保留本章内依赖，彻底删掉跨章节依赖。
-    # 本章内仍按"只取第一个有效前置"裁剪，保持单前置链式。
-    # 跨章节依赖是 FTB Quests 的 isExcludedByOtherQuestline
-    # 递归崩溃的主要诱因，这里直接丢弃。
     cross_chapter_dropped = 0
     for q, fq in zip(quests, ftb_quests):
-        first_dep = None
+        first_dep_key = None
         for d in q.get("dependencies", []):
-            fid = key_to_ftb_id.get(d)
-            if fid is not None and fid != fq["id"]:
-                first_dep = fid
+            if d in key_to_ftb_id and key_to_ftb_id[d] != fq["id"]:
+                first_dep_key = d
                 break
-            elif fid is None:
-                # key 不在本章映射里 → 跨章节依赖，丢弃
+            elif d not in key_to_ftb_id:
                 cross_chapter_dropped += 1
                 log(f"    [跨章节依赖] 丢弃: {q['key']} -> {d}（不在本章）")
-        if first_dep is not None:
-            fq["dependencies"] = [first_dep]
+        if first_dep_key is not None:
+            fq["_dep_key"] = first_dep_key
         else:
+            fq.pop("_dep_key", None)
             fq.pop("dependencies", None)
+
     if cross_chapter_dropped:
         log(f"    [跨章节依赖] 本章共丢弃 {cross_chapter_dropped} 条")
 
-    # 【修复7】坐标列数兜底，防止 divmod 除零或坐标全重叠
+    # 【修复10】FTB ID 层面 DFS 环检测 + 断环
+    graph = {}
+    for fq in ftb_quests:
+        dep_key = fq.get("_dep_key")
+        if dep_key is not None:
+            graph[fq["id"]] = [key_to_ftb_id[dep_key]]
+        else:
+            graph[fq["id"]] = []
+
+    color = {nid: 0 for nid in graph}
+    broken = 0
+
+    def dfs_cycle(node):
+        nonlocal broken
+        color[node] = 1
+        for dep in list(graph[node]):
+            c = color.get(dep, 0)
+            if c == 1:
+                graph[node].remove(dep)
+                broken += 1
+                dep_q = id_to_quest_key.get(dep, dep)
+                node_q = id_to_quest_key.get(node, node)
+                log(f"    [环检测] 断开依赖: {node_q}({node}) -> {dep_q}({dep})")
+            elif c == 0 and dep in graph:
+                dfs_cycle(dep)
+        color[node] = 2
+
+    for nid in list(graph):
+        if color[nid] == 0:
+            dfs_cycle(nid)
+
+    if broken:
+        log(f"    [环检测] 本章共断开 {broken} 条循环依赖")
+
+    for fq in ftb_quests:
+        fq.pop("_dep_key", None)
+        if graph[fq["id"]]:
+            fq["dependencies"] = graph[fq["id"]]
+        else:
+            fq.pop("dependencies", None)
+
+    # 【修复7】坐标列数兜底
     cols = max(1, int(C("COLS_PER_ROW", 6)))
     col_sp = float(C("COL_SPACING", 2.0))
     row_sp = float(C("ROW_SPACING", 1.5))
@@ -1229,7 +1312,7 @@ def _build_chapter_dict(chapter_index, quests, chapter_icon, items, group_id):
         "default_quest_shape": "circle",
         "quests": ftb_quests,
     }
-    # 【修复4】group 为空时不写该字段，避免 FTB 归入默认组参与跨组排除
+    # 【修复4】group 为空时不写该字段
     if group_id:
         chapter_dict["group"] = group_id
     return chapter_dict
@@ -1280,7 +1363,7 @@ def save_data_snbt(output_dir, pack_title=None):
     if pack_title is None:
         pack_title = C("PACK_TITLE", "") or "FTB Quests"
     os.makedirs(output_dir, exist_ok=True)
-    # 【修复3】progression_mode 默认 linear，避免 flexible 触发排除判定递归
+    # 【修复3】progression_mode 默认 linear
     progression_mode = C("PROGRESSION_MODE", "linear")
     if progression_mode == "flexible":
         log("[警告] PROGRESSION_MODE = flexible，会启用 FTB 排除判定逻辑，"
@@ -1298,7 +1381,7 @@ def save_data_snbt(output_dir, pack_title=None):
         "grid_scale": 0.5,
         "pause_game": False,
         "show_lock_icons": True,
-        "exclusion_enabled": False,   # 【保险】若该版本支持，直接关闭排除判定
+        "exclusion_enabled": False,
     }
     path = os.path.join(output_dir, "data.snbt")
     with open(path, "w", encoding="utf-8") as f:
@@ -1308,13 +1391,7 @@ def save_data_snbt(output_dir, pack_title=None):
 
 # ==================== 【修复9】跨章节依赖检查 ====================
 def check_cross_chapter_dependencies(output_dir):
-    """生成结束后，扫描所有 chapter_*.snbt，检查依赖 ID 是否跨章节。
-
-    每个 chapter 文件的 quests 里，每个 quest 有 id: <数字>
-    和 dependencies: [<数字>, ...]。
-    我们收集所有章节的 quest id，然后检查每个 quest 的 dependencies
-    是否都属于同一章节。如果某个依赖 id 属于另一个章节，就是跨章节依赖。
-    """
+    """生成结束后，扫描所有 chapter_*.snbt，检查依赖 ID 是否跨章节。"""
     chapter_files = sorted(
         f for f in os.listdir(output_dir)
         if f.startswith("chapter_") and f.endswith(".snbt")
@@ -1323,22 +1400,17 @@ def check_cross_chapter_dependencies(output_dir):
         log("[跨章节检查] 未找到 chapter_*.snbt，跳过")
         return 0
 
-    # 1. 解析每个章节文件的 quest id 集合
-    chapter_quest_ids = {}   # file -> set(quest_id_str)
-    chapter_deps = {}        # file -> list[(quest_id, [dep_id, ...])]
+    chapter_quest_ids = {}
+    chapter_deps = {}
     for fname in chapter_files:
         path = os.path.join(output_dir, fname)
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
-        # 抓所有 id: "数字" 或 id: 数字
         ids = set(re.findall(r'^\s*id:\s*"?(\d+)"?', text, re.M))
-        # 只保留 quest 级别的 id（每个 quest 的 id 字段紧跟 title）
-        # 更稳妥：抓每个 quest 块
         quest_blocks = re.findall(
             r'\{\s*id:\s*"?(\d+)"?,.*?tasks:', text, re.S
         )
         chapter_quest_ids[fname] = set(quest_blocks) if quest_blocks else ids
-        # 抓 dependencies: [ "id1", "id2" ]
         deps = []
         for m in re.finditer(
             r'\{\s*id:\s*"?(\d+)"?,.*?dependencies:\s*\[(.*?)\]',
@@ -1349,7 +1421,6 @@ def check_cross_chapter_dependencies(output_dir):
             deps.append((qid, dep_ids))
         chapter_deps[fname] = deps
 
-    # 2. 建立全局 id -> chapter 映射
     id_to_chapter = {}
     for fname, ids in chapter_quest_ids.items():
         for iid in ids:
@@ -1358,7 +1429,6 @@ def check_cross_chapter_dependencies(output_dir):
                     f"{id_to_chapter[iid]} 和 {fname}（ID 冲突）")
             id_to_chapter[iid] = fname
 
-    # 3. 检查每个依赖是否属于同一章节
     cross_count = 0
     for fname, deps in chapter_deps.items():
         for qid, dep_ids in deps:
@@ -1381,6 +1451,117 @@ def check_cross_chapter_dependencies(output_dir):
         log(f"\n[跨章节检查] ✓ 全部 {len(chapter_files)} 个章节文件，"
             f"未发现跨章节依赖。")
     return cross_count
+
+
+# ==================== 【修复12】本章内环检测 ====================
+def check_cycles(output_dir):
+    """生成结束后，扫描所有 chapter_*.snbt，检查本章内是否存在循环依赖。"""
+    chapter_files = sorted(
+        f for f in os.listdir(output_dir)
+        if f.startswith("chapter_") and f.endswith(".snbt")
+    )
+    if not chapter_files:
+        log("[环检测] 未找到 chapter_*.snbt，跳过")
+        return 0
+
+    total_cycles = 0
+    for fname in chapter_files:
+        path = os.path.join(output_dir, fname)
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        quest_ids = set(re.findall(r'\{\s*id:\s*"?(\d+)"?,.*?tasks:', text, re.S))
+        graph = {qid: [] for qid in quest_ids}
+        for m in re.finditer(
+            r'\{\s*id:\s*"?(\d+)"?,.*?dependencies:\s*\[(.*?)\]',
+            text, re.S
+        ):
+            qid = m.group(1)
+            dep_ids = re.findall(r'"(\d+)"', m.group(2))
+            if qid in graph:
+                graph[qid] = [d for d in dep_ids if d in quest_ids]
+
+        color = {nid: 0 for nid in graph}
+        cycles_found = []
+
+        def dfs_cycle(node, stack):
+            color[node] = 1
+            stack.append(node)
+            for dep in graph[node]:
+                c = color.get(dep, 0)
+                if c == 1:
+                    try:
+                        idx = stack.index(dep)
+                        cycle_path = stack[idx:] + [dep]
+                    except ValueError:
+                        cycle_path = [node, dep]
+                    cycles_found.append(cycle_path)
+                elif c == 0:
+                    dfs_cycle(dep, stack)
+            stack.pop()
+            color[node] = 2
+
+        for nid in list(graph):
+            if color[nid] == 0:
+                dfs_cycle(nid, [])
+
+        if cycles_found:
+            total_cycles += len(cycles_found)
+            log(f"[环检测] ✗ {fname} 发现 {len(cycles_found)} 个环：")
+            for cyc in cycles_found[:5]:
+                log(f"    → {' -> '.join(cyc)}")
+            if len(cycles_found) > 5:
+                log(f"    ... 还有 {len(cycles_found) - 5} 个环未列出")
+
+    if total_cycles:
+        log(f"\n[环检测] 发现 {total_cycles} 个循环依赖！")
+        log("[环检测] 循环依赖会触发 FTB isQuestObjectExcluded 递归爆栈。")
+    else:
+        log(f"\n[环检测] ✓ 全部 {len(chapter_files)} 个章节文件，未发现循环依赖。")
+    return total_cycles
+
+
+# ==================== 【修复13】依赖繁简检查 ====================
+def check_dependency_complexity(output_dir, threshold=3):
+    """扫描生成的 SNBT，统计每个章节的依赖数量，报告过繁章节。
+
+    threshold：单个任务依赖数超过此值即视为“过繁”。
+    """
+    chapter_files = sorted(
+        f for f in os.listdir(output_dir)
+        if f.startswith("chapter_") and f.endswith(".snbt")
+    )
+    if not chapter_files:
+        log("[繁简检查] 未找到 chapter_*.snbt，跳过")
+        return 0
+
+    total_heavy = 0
+    for fname in chapter_files:
+        path = os.path.join(output_dir, fname)
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        dep_counts = []
+        for m in re.finditer(r'dependencies:\s*\[(.*?)\]', text, re.S):
+            ids = re.findall(r'"(\d+)"', m.group(1))
+            dep_counts.append(len(ids))
+
+        heavy = [c for c in dep_counts if c > threshold]
+        avg = sum(dep_counts) / len(dep_counts) if dep_counts else 0
+        total_heavy += len(heavy)
+
+        if heavy:
+            log(f"[繁简检查] {fname}: {len(dep_counts)} 个任务，"
+                f"平均依赖 {avg:.2f}，{len(heavy)} 个任务依赖 > {threshold}")
+        else:
+            log(f"[繁简检查] ✓ {fname}: {len(dep_counts)} 个任务，"
+                f"平均依赖 {avg:.2f}，无过繁任务")
+
+    if total_heavy:
+        log(f"\n[繁简检查] 共 {total_heavy} 个任务依赖过繁（> {threshold}）")
+    else:
+        log(f"\n[繁简检查] ✓ 全部章节依赖繁简正常。")
+    return total_heavy
 
 
 # ==================== 主流程 ====================
@@ -1456,19 +1637,34 @@ def main():
 
     _save_mcmod_cache()
 
-    # 【修复9】生成后做跨章节依赖检查
+    # 【修复9】跨章节依赖检查
     log("\n" + "=" * 60)
     log("[跨章节检查] 开始扫描生成的 SNBT 文件...")
     cross = check_cross_chapter_dependencies(chapters_output)
     log("=" * 60)
 
+    # 【修复12】本章内环检测
+    log("\n" + "=" * 60)
+    log("[环检测] 开始扫描本章内循环依赖...")
+    cycles = check_cycles(chapters_output)
+    log("=" * 60)
+
+    # 【修复13】依赖繁简检查
+    log("\n" + "=" * 60)
+    log("[繁简检查] 开始扫描任务依赖繁简...")
+    heavy = check_dependency_complexity(chapters_output)
+    log("=" * 60)
+
     log("\n" + "=" * 60)
     log(f"生成结束：成功 {success}/{total} 章")
     log(f"输出目录: {chapters_output}")
-    if cross:
-        log(f"跨章节依赖: {cross} 条（请检查上方日志）")
+    log(f"跨章节依赖: {cross} 条" + ("（安全）" if cross == 0 else "（请检查上方日志）"))
+    log(f"循环依赖: {cycles} 个" + ("（安全）" if cycles == 0 else "（请检查上方日志）"))
+    log(f"过繁依赖任务: {heavy} 个" + ("（安全）" if heavy == 0 else "（请检查上方日志）"))
+    if cross == 0 and cycles == 0 and heavy == 0:
+        log("✓ 全部检查通过，可以进游戏测试。")
     else:
-        log("跨章节依赖: 0 条（安全）")
+        log("✗ 存在依赖问题，建议先修复再进游戏。")
     log("=" * 60)
     close_log()
 

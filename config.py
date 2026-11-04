@@ -17,7 +17,7 @@ config.py —— ftb-bate 配置文件（SNBT 输出版 · 白板）
 2. CHAPTER_GROUPS[0].chapters[0].title 必须与 PACK_INTRO_CHAPTER_TITLE 完全一致。
 3. COLS_PER_ROW 必须 ≥ 1，COL_SPACING / ROW_SPACING 必须 > 0。
 4. 不要往 DIFFICULTY_TIERS 里加 reward_tables_ref（本工具用内嵌奖励）。
-5. 生成端会强制单前置 + 严格链式，避免"分支合并"触发 FTB 排除判定 bug。
+5. 生成端会强制单前置 + 按阈值精简依赖，避免"分支合并"触发 FTB 排除判定 bug。
 6. PROGRESSION_MODE 建议保持 linear，flexible 会启用排除判定逻辑。
 ========================================================
 """
@@ -88,6 +88,18 @@ PACK_INTRO = (
 #                 在任务图存在分支合并时可能无限递归导致 StackOverflowError。
 # 主程序默认读 "linear"，这里显式写出方便查看和修改。
 PROGRESSION_MODE = "linear"
+
+
+# ==================== 依赖精简 ====================
+# 【新增】依赖数量超过此值的任务会被清空依赖（视为独立任务）。
+# 依赖数量 ≤ 此值的任务保留依赖，作为关键剧情锁。
+# 默认 1：只保留单前置任务，多依赖任务全部清空，避免分支合并。
+DEPENDENCY_KEEP_THRESHOLD = 1
+
+# 【新增】强制保留依赖的关键任务 key 列表。
+# 列表中的任务无论依赖多少都保留（最多保留 1 个），用于 Boss 解锁链等。
+# 示例：["t5", "t12"]  —— 对应 AI 生成的 key
+DEPENDENCY_FORCE_KEEP_KEYS = []
 
 
 # ==================== 整合包介绍章节 ====================
@@ -205,7 +217,7 @@ REWARD_FALLBACK_POOL = [
 #   2. CHAPTER_GROUPS[0].chapters[0].title 必须 == PACK_INTRO_CHAPTER_TITLE
 #   3. 每个 chapter 的 title 在同一 group 内建议唯一
 #   4. AI 生成的依赖 key 只在组内有效，跨组依赖会被丢弃
-#   5. 生成端强制严格链式，task 图无分支合并节点
+#   5. 生成端强制单前置 + 按阈值精简依赖，task 图无分支合并节点
 #
 # 每章字段:
 #   title            章节标题
@@ -333,13 +345,28 @@ def _validate_config():
             "存在 isExcludedByOtherQuestline 递归风险，建议改为 linear"
         )
 
-    # 5. 章节自身检查
+    # 5. 依赖精简配置检查
+    if not isinstance(DEPENDENCY_KEEP_THRESHOLD, int) or DEPENDENCY_KEEP_THRESHOLD < 0:
+        errors.append(
+            f"DEPENDENCY_KEEP_THRESHOLD = {DEPENDENCY_KEEP_THRESHOLD}，"
+            f"必须为 ≥ 0 的整数"
+        )
+    if not isinstance(DEPENDENCY_FORCE_KEEP_KEYS, list):
+        errors.append("DEPENDENCY_FORCE_KEEP_KEYS 必须是列表")
+    else:
+        for k in DEPENDENCY_FORCE_KEEP_KEYS:
+            if not isinstance(k, str):
+                errors.append(
+                    f"DEPENDENCY_FORCE_KEEP_KEYS 中存在非字符串项: {k!r}"
+                )
+
+    # 6. 章节自身检查
     for gi, g in enumerate(CHAPTER_GROUPS):
         for ci, ch in enumerate(g.get("chapters", [])):
             if not ch.get("title"):
                 warns.append(f"CHAPTER_GROUPS[{gi}].chapters[{ci}].title 为空")
 
-    # 6. 汇报
+    # 7. 汇报
     if errors:
         print("\n[配置错误] 以下问题会直接导致 FTB Quests 崩溃或生成异常：")
         for e in errors:
